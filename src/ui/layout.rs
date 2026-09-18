@@ -6,13 +6,14 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::app::AppState;
 
-use super::panes::{current, parent, preview};
+use super::panes::{current, open_with, parent, preview};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let columns = split_panes(frame.area());
     parent::render(frame, state, columns[0]);
     current::render(frame, state, columns[1]);
     preview::render(frame, state, columns[2]);
+    open_with::render(frame, state);
 }
 
 /// Same 20/40/40 split `render` uses, so preview scrolling can page by the
@@ -56,6 +57,28 @@ mod tests {
         assert!(content.contains("[1] Parent"));
         assert!(content.contains("[2] Current"));
         assert!(content.contains("[3] Preview"));
+    }
+
+    #[test]
+    fn open_with_overlay_paints_on_top_of_the_panes() {
+        let mut state = AppState::new("/tmp".into());
+        state.mode = crate::app::open_with::InteractionMode::OpenWith(
+            crate::app::open_with::OpenWithPrompt::new("/tmp/a.txt".into(), 1),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .fold(String::new(), |mut acc, cell| {
+                acc.push_str(cell.symbol());
+                acc
+            });
+        assert!(content.contains("[1] Parent"));
+        assert!(content.contains("Open with"));
+        assert!(content.contains("a.txt"));
     }
 
     #[test]

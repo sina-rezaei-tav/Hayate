@@ -78,6 +78,18 @@ impl EventHandler {
             .await
             .ok_or_else(|| anyhow::anyhow!("event channel closed: background task ended"))
     }
+
+    /// Stops polling stdin so an external program (e.g. `$EDITOR`) can own
+    /// the TTY. Pair with [`recapture_tty`].
+    pub fn release_tty(&mut self) {
+        self.task.abort();
+    }
+
+    /// Starts a fresh input/tick task after [`release_tty`].
+    pub fn recapture_tty(&mut self) {
+        self.release_tty();
+        *self = Self::new();
+    }
 }
 
 impl Default for EventHandler {
@@ -190,5 +202,36 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("background task was not aborted promptly after EventHandler was dropped");
+    }
+
+    #[tokio::test]
+    async fn release_tty_aborts_the_background_task() {
+        let mut handler = EventHandler::spawn(PendingInput, Duration::from_secs(10));
+        let abort_handle = handler.task.abort_handle();
+
+        handler.release_tty();
+
+        for _ in 0..50 {
+            if abort_handle.is_finished() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("background task was not aborted promptly after release_tty");
+    }
+
+    #[tokio::test]
+    async fn recapture_from_a_test_stream_emits_again() {
+        let mut handler = EventHandler::spawn(PendingInput, Duration::from_secs(10));
+        handler.release_tty();
+
+        let items: Vec<io::Result<Event>> = vec![Ok(key_event(KeyCode::Char('x')))];
+        let mut handler = EventHandler::spawn(tokio_stream::iter(items), Duration::from_secs(10));
+
+        let event = next_or_timeout(&mut handler).await.unwrap();
+        assert!(matches!(
+            event,
+            AppEvent::Input(Event::Key(k)) if k.code == KeyCode::Char('x')
+        ));
     }
 }

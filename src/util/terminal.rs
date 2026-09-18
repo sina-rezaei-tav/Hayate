@@ -42,6 +42,21 @@ impl Tui {
     pub fn restore(&mut self) -> anyhow::Result<()> {
         restore_once(&CrosstermRawMode, &mut io::stdout(), &mut self.restored)
     }
+
+    /// Leaves the alternate screen so an external program can own the TTY.
+    /// Pair with [`resume`]. Unlike a final [`restore`], `Drop` will still
+    /// tear down if resume never runs — `resume` clears the restored flag.
+    pub fn suspend(&mut self) -> anyhow::Result<()> {
+        self.restore()
+    }
+
+    /// Re-enters raw mode and the alternate screen after [`suspend`].
+    /// No-op if the terminal was not suspended.
+    pub fn resume(&mut self) -> anyhow::Result<()> {
+        resume_once(&CrosstermRawMode, &mut io::stdout(), &mut self.restored)?;
+        self.terminal.clear()?;
+        Ok(())
+    }
 }
 
 impl Deref for Tui {
@@ -100,6 +115,22 @@ fn restore_once<R: RawMode, W: Write>(
     leave_screen(writer)?;
     raw_mode.disable()?;
     *restored = true;
+    Ok(())
+}
+
+/// Inverse of [`restore_once`]: re-enable raw mode and the alternate screen
+/// after a suspend. No-op when the terminal is already live.
+fn resume_once<R: RawMode, W: Write>(
+    raw_mode: &R,
+    writer: &mut W,
+    restored: &mut bool,
+) -> anyhow::Result<()> {
+    if !*restored {
+        return Ok(());
+    }
+    raw_mode.enable()?;
+    enter_screen(writer)?;
+    *restored = false;
     Ok(())
 }
 
@@ -167,11 +198,13 @@ mod tests {
 
     #[derive(Default)]
     struct CountingRawMode {
+        enables: Cell<u32>,
         disables: Cell<u32>,
     }
 
     impl RawMode for CountingRawMode {
         fn enable(&self) -> io::Result<()> {
+            self.enables.set(self.enables.get() + 1);
             Ok(())
         }
 
@@ -192,6 +225,7 @@ mod tests {
         restore_once(&raw_mode, &mut buf, &mut restored).unwrap();
 
         assert_eq!(raw_mode.disables.get(), 1);
+        assert_eq!(raw_mode.enables.get(), 0);
         assert!(restored);
         // The screen-leave sequence itself should also only be written once.
         let expected = format!(
@@ -200,5 +234,54 @@ mod tests {
             ansi_of(LeaveAlternateScreen)
         );
         assert_eq!(String::from_utf8(buf).unwrap(), expected);
+    }
+
+    #[test]
+    fn resume_once_is_a_noop_when_not_suspended() {
+        let raw_mode = CountingRawMode::default();
+        let mut restored = false;
+        let mut buf = Vec::new();
+
+        resume_once(&raw_mode, &mut buf, &mut restored).unwrap();
+
+        assert_eq!(raw_mode.enables.get(), 0);
+        assert!(buf.is_empty());
+        assert!(!restored);
+    }
+
+    #[test]
+    fn resume_once_reenters_raw_mode_and_the_alternate_screen() {
+        let raw_mode = CountingRawMode::default();
+        let mut restored = false;
+        let mut buf = Vec::new();
+
+        restore_once(&raw_mode, &mut buf, &mut restored).unwrap();
+        buf.clear();
+        resume_once(&raw_mode, &mut buf, &mut restored).unwrap();
+
+        assert_eq!(raw_mode.disables.get(), 1);
+        assert_eq!(raw_mode.enables.get(), 1);
+        assert!(!restored);
+        let expected = format!(
+            "{}{}",
+            ansi_of(EnterAlternateScreen),
+            ansi_of(EnableMouseCapture)
+        );
+        assert_eq!(String::from_utf8(buf).unwrap(), expected);
+    }
+
+    #[test]
+    fn resume_then_restore_tears_down_again() {
+        let raw_mode = CountingRawMode::default();
+        let mut restored = false;
+        let mut buf = Vec::new();
+
+        restore_once(&raw_mode, &mut buf, &mut restored).unwrap();
+        resume_once(&raw_mode, &mut buf, &mut restored).unwrap();
+        restore_once(&raw_mode, &mut buf, &mut restored).unwrap();
+
+        assert_eq!(raw_mode.disables.get(), 2);
+        assert_eq!(raw_mode.enables.get(), 1);
+        assert!(restored);
     }
 }

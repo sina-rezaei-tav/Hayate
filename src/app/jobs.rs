@@ -11,6 +11,7 @@ use crate::fs;
 use crate::preview;
 
 use super::message::Message;
+use super::open_with;
 
 /// Spawns the directory scanner for `path`, forwarding each batch (and a
 /// final `ScanFinished`) onto `messages`, tagged with `generation` so the
@@ -109,6 +110,25 @@ pub fn spawn_preview(
             let _ = messages.send(Message::PreviewReady(path, payload));
         }
     });
+}
+
+/// Lists unique executables on `PATH` for the open-with picker.
+pub fn spawn_open_with_listing(
+    generation: u64,
+    cancel_token: CancellationToken,
+    messages: UnboundedSender<Message>,
+) {
+    let path_var = std::env::var_os("PATH");
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        if cancel_token.is_cancelled() {
+            return;
+        }
+        let names = open_with::list_path_executables(path_var.as_deref(), &cancel_token);
+        if cancel_token.is_cancelled() {
+            return;
+        }
+        let _ = messages.send(Message::OpenWithListing(generation, names));
+    }));
 }
 
 #[cfg(test)]

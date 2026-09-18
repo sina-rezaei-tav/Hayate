@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let title = format!(
         "[2] Current ({} entries) — {}",
         state.entries.len(),
-        recount_status(state)
+        pane_status(state)
     );
     let block = Block::default().borders(Borders::ALL).title(title);
 
@@ -54,8 +54,14 @@ fn entry_label(entry: &crate::fs::FileEntry) -> String {
 }
 
 /// Status of the recursive file count (triggered by 'r', cancellable with
-/// Esc). Shown in this pane's title since the count is a property of the
-/// whole current directory, not of any single selected entry.
+/// Esc), or a one-shot notice from a failed command (missing `$EDITOR`).
+fn pane_status(state: &AppState) -> String {
+    if let Some(notice) = &state.notice {
+        return notice.clone();
+    }
+    recount_status(state)
+}
+
 fn recount_status(state: &AppState) -> String {
     if state.is_counting_recursively {
         "counting recursively... (Esc to cancel)".to_string()
@@ -127,6 +133,22 @@ mod tests {
         let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 60, 6));
 
         assert!(rows.iter().any(|(text, _)| text.contains("counting recursively")));
+    }
+
+    #[test]
+    fn title_shows_a_notice_instead_of_the_recount_prompt() {
+        let mut state = AppState::new("/tmp".into());
+        state.notice = Some("no editor found (set EDITOR, or install nvim/vim/vi/nano)".into());
+
+        let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 80, 6));
+        let blob = rows
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(blob.contains("no editor found"), "{blob:?}");
+        assert!(!blob.contains("press 'r' to count"), "notice should replace the recount prompt: {blob:?}");
     }
 
     #[test]
