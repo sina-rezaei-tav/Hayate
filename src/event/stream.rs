@@ -80,6 +80,12 @@ impl EventHandler {
     }
 }
 
+impl Default for EventHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for EventHandler {
     fn drop(&mut self) {
         self.task.abort();
