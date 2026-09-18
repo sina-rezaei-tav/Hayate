@@ -23,6 +23,16 @@ pub struct AppState {
     /// generation they were started with so a cancelled walk cannot apply
     /// late batches to the new listing.
     pub scan_generation: u64,
+    /// Cached contents of the highlighted file. The UI never reads disk
+    /// for this; a background job fills it in.
+    pub preview: crate::preview::FilePreview,
+    /// Vertical offset (in wrapped lines) of the preview pane. Reset when
+    /// the highlighted file changes.
+    pub preview_scroll: u16,
+    /// Last drawn terminal size, used to page the preview by a real pane
+    /// of lines instead of a guessed constant.
+    pub frame_width: u16,
+    pub frame_height: u16,
     /// Result of the last recursive file count (triggered by pressing 'r'),
     /// if one has completed.
     pub recursive_file_count: Option<u64>,
@@ -40,6 +50,10 @@ impl AppState {
             selected: 0,
             history: HashMap::new(),
             scan_generation: 0,
+            preview: crate::preview::FilePreview::Idle,
+            preview_scroll: 0,
+            frame_width: 80,
+            frame_height: 24,
             recursive_file_count: None,
             is_counting_recursively: false,
         }
@@ -57,6 +71,13 @@ impl AppState {
     /// The currently highlighted entry, or `None` if the list is empty.
     pub fn selected_entry(&self) -> Option<&FileEntry> {
         self.selected_index().and_then(|i| self.entries.get(i))
+    }
+
+    /// Moves the preview by `delta` wrapped lines, clamped to `limit`
+    /// (the maximum scroll computed from the current pane size).
+    pub fn scroll_preview(&mut self, delta: i32, limit: u16) {
+        let next = i32::from(self.preview_scroll).saturating_add(delta);
+        self.preview_scroll = next.clamp(0, i32::from(limit)) as u16;
     }
 }
 
@@ -113,5 +134,14 @@ mod tests {
         assert_eq!(state.selected_index(), Some(1));
         assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
         assert_eq!(state.selected, 10, "the intended index is kept for later batches");
+    }
+
+    #[test]
+    fn scroll_preview_clamps_to_the_limit() {
+        let mut state = AppState::new("/tmp".into());
+        state.scroll_preview(5, 3);
+        assert_eq!(state.preview_scroll, 3);
+        state.scroll_preview(-10, 3);
+        assert_eq!(state.preview_scroll, 0);
     }
 }

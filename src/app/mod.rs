@@ -34,6 +34,7 @@ struct LoopCtl {
     app_cancel: CancellationToken,
     scan_cancel: CancellationToken,
     active_job_cancel: Option<CancellationToken>,
+    preview_cancel: Option<CancellationToken>,
     messages: UnboundedSender<Message>,
 }
 
@@ -43,7 +44,14 @@ impl LoopCtl {
             scan_cancel: app_cancel.child_token(),
             app_cancel,
             active_job_cancel: None,
+            preview_cancel: None,
             messages,
+        }
+    }
+
+    fn cancel_preview(&mut self) {
+        if let Some(token) = self.preview_cancel.take() {
+            token.cancel();
         }
     }
 
@@ -56,6 +64,7 @@ impl LoopCtl {
         if let Some(token) = self.active_job_cancel.take() {
             token.cancel();
         }
+        self.cancel_preview();
 
         let generation = state.scan_generation;
         if let Some(path) = plan.current {
@@ -96,6 +105,11 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
             break Ok(());
         }
 
+        if let Ok(size) = tui.size() {
+            state.frame_width = size.width;
+            state.frame_height = size.height;
+        }
+
         if let Err(err) = tui.draw(|frame| ui::render(frame, &state)) {
             break Err(err.into());
         }
@@ -106,6 +120,7 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
                     Ok(AppEvent::Input(Event::Key(key))) => {
                         if let Some(command) = command_for_key(key) {
                             run_command(command, &mut state, &mut ctl);
+                            request_preview_if_needed(&mut state, &mut ctl);
                         }
                     }
                     Ok(_) => {}
@@ -116,7 +131,11 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
                 if matches!(message, Message::RecursiveCountFinished(_)) {
                     ctl.active_job_cancel = None;
                 }
+                if matches!(message, Message::PreviewReady(_, _)) {
+                    ctl.preview_cancel = None;
+                }
                 update(&mut state, message);
+                request_preview_if_needed(&mut state, &mut ctl);
             }
         }
     };
@@ -165,7 +184,53 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
                 ctl.apply_scan_plan(state, plan);
             }
         }
+        Command::PreviewPageUp => {
+            let (page, limit) = preview_scroll_metrics(state);
+            state.scroll_preview(-page, limit);
+        }
+        Command::PreviewPageDown => {
+            let (page, limit) = preview_scroll_metrics(state);
+            state.scroll_preview(page, limit);
+        }
     }
+}
+
+/// Starts a preview read when the highlighted file is not already cached.
+/// Directories and empty selections clear any in-flight read.
+fn request_preview_if_needed(state: &mut AppState, ctl: &mut LoopCtl) {
+    let wanted = state
+        .selected_entry()
+        .filter(|entry| !entry.is_dir)
+        .map(|entry| entry.path.clone());
+
+    match wanted {
+        None => {
+            ctl.cancel_preview();
+            state.preview = crate::preview::FilePreview::Idle;
+            state.preview_scroll = 0;
+        }
+        Some(path) if state.preview.path() == Some(path.as_path()) => {}
+        Some(path) => {
+            ctl.cancel_preview();
+            let token = ctl.app_cancel.child_token();
+            state.preview = crate::preview::FilePreview::Loading(path.clone());
+            state.preview_scroll = 0;
+            jobs::spawn_preview(path, token.clone(), ctl.messages.clone());
+            ctl.preview_cancel = Some(token);
+        }
+    }
+}
+
+fn preview_scroll_metrics(state: &AppState) -> (i32, u16) {
+    let area = ui::layout::split_panes(ratatui::layout::Rect::new(
+        0,
+        0,
+        state.frame_width,
+        state.frame_height,
+    ))[2];
+    let limit = ui::panes::preview::scroll_limit(state, area);
+    let page = i32::from(ui::panes::preview::page_size(area));
+    (page, limit)
 }
 
 #[cfg(test)]
@@ -341,5 +406,129 @@ mod tests {
         cancel_token.cancel();
 
         assert!(job_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn requesting_preview_loads_the_selected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.entries = vec![FileEntry::new(path.clone(), false, 5)];
+        let (mut ctl, mut rx) = ctl();
+
+        request_preview_if_needed(&mut state, &mut ctl);
+        assert!(matches!(state.preview, crate::preview::FilePreview::Loading(_)));
+
+        let message = rx.recv().await.expect("preview job should report back");
+        update(&mut state, message);
+
+        assert!(matches!(
+            state.preview,
+            crate::preview::FilePreview::Text { ref content, .. } if content == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn requesting_preview_again_for_the_same_file_does_not_respawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.entries = vec![FileEntry::new(path, false, 5)];
+        let (mut ctl, _rx) = ctl();
+
+        request_preview_if_needed(&mut state, &mut ctl);
+        let first = ctl.preview_cancel.clone().expect("first request should spawn");
+        request_preview_if_needed(&mut state, &mut ctl);
+
+        // A respawn would cancel the previous token and replace it.
+        assert!(!first.is_cancelled());
+        assert!(ctl.preview_cancel.is_some());
+    }
+
+    #[test]
+    fn requesting_preview_for_a_directory_clears_cached_file_text() {
+        let mut state = state();
+        state.entries = vec![FileEntry::new("/tmp/sub".into(), true, 0)];
+        state.preview_scroll = 12;
+        state.preview = crate::preview::FilePreview::Text {
+            path: "/tmp/old.txt".into(),
+            content: "stale".into(),
+            truncated: false,
+        };
+        let (mut ctl, _rx) = ctl();
+        let previous = ctl.app_cancel.child_token();
+        ctl.preview_cancel = Some(previous.clone());
+
+        request_preview_if_needed(&mut state, &mut ctl);
+
+        assert!(previous.is_cancelled());
+        assert!(matches!(state.preview, crate::preview::FilePreview::Idle));
+        assert_eq!(state.preview_scroll, 0);
+        assert!(ctl.preview_cancel.is_none());
+    }
+
+    fn tall_preview_state() -> AppState {
+        let mut state = state();
+        state.frame_width = 80;
+        state.frame_height = 24;
+        state.entries = vec![FileEntry::new("/tmp/a.txt".into(), false, 0)];
+        state.preview = crate::preview::FilePreview::Text {
+            path: "/tmp/a.txt".into(),
+            content: (0..80).map(|i| format!("LINE-{i}")).collect::<Vec<_>>().join("\n"),
+            truncated: false,
+        };
+        state
+    }
+
+    #[test]
+    fn preview_page_down_scrolls_without_moving_the_file_list() {
+        let mut state = tall_preview_state();
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::PreviewPageDown, &mut state, &mut ctl);
+
+        assert!(state.preview_scroll > 0);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn preview_page_down_stops_at_the_last_visible_page() {
+        let mut state = tall_preview_state();
+        let (mut ctl, _rx) = ctl();
+
+        for _ in 0..20 {
+            run_command(Command::PreviewPageDown, &mut state, &mut ctl);
+        }
+
+        let (_, limit) = preview_scroll_metrics(&state);
+        assert_eq!(state.preview_scroll, limit);
+        assert!(limit > 0);
+    }
+
+    #[test]
+    fn preview_page_up_from_the_top_stays_at_zero() {
+        let mut state = tall_preview_state();
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::PreviewPageUp, &mut state, &mut ctl);
+
+        assert_eq!(state.preview_scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn highlighting_a_different_file_resets_preview_scroll() {
+        let mut state = tall_preview_state();
+        state.entries.push(FileEntry::new("/tmp/b.txt".into(), false, 0));
+        state.preview_scroll = 10;
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::SelectNext, &mut state, &mut ctl);
+        request_preview_if_needed(&mut state, &mut ctl);
+
+        assert_eq!(state.preview_scroll, 0);
     }
 }

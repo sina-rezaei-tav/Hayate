@@ -67,6 +67,8 @@ pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
 fn begin_generation(state: &mut AppState) {
     state.history.insert(state.current_dir.clone(), state.selected);
     state.scan_generation = state.scan_generation.wrapping_add(1);
+    state.preview = crate::preview::FilePreview::Idle;
+    state.preview_scroll = 0;
     state.recursive_file_count = None;
     state.is_counting_recursively = false;
 }
@@ -255,5 +257,19 @@ mod tests {
 
         assert_eq!(state.current_dir, PathBuf::from("/tmp/project/src"));
         assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn changing_directory_clears_a_cached_preview() {
+        let mut state = state_in_project();
+        state.preview = crate::preview::FilePreview::Text {
+            path: "/tmp/project/README.md".into(),
+            content: "hello".into(),
+            truncated: false,
+        };
+
+        enter_selected(&mut state).unwrap();
+
+        assert!(matches!(state.preview, crate::preview::FilePreview::Idle));
     }
 }

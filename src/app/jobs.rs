@@ -1,7 +1,6 @@
 //! Spawns background jobs and forwards their results onto the shared
-//! `Message` channel. `fs::scan_directory` / `fs::count_files_recursive`
-//! stay untouched and independently tested; these are thin adapters that
-//! translate their existing channel types into the app's unified `Message`.
+//! `Message` channel. `fs::` / `preview::` stay independently tested; these
+//! adapters only translate their results into the app's unified `Message`.
 
 use std::path::PathBuf;
 
@@ -9,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::fs;
+use crate::preview;
 
 use super::message::Message;
 
@@ -86,6 +86,20 @@ pub fn spawn_recursive_count(
     tokio::spawn(async move {
         let count = receiver.await.ok().filter(|_| !cancel_token.is_cancelled());
         let _ = messages.send(Message::RecursiveCountFinished(count));
+    });
+}
+
+/// Reads a text preview of `path` off the render thread. Sends nothing if
+/// the load is cancelled (the selection moved on).
+pub fn spawn_preview(
+    path: PathBuf,
+    cancel_token: CancellationToken,
+    messages: UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        if let Some(payload) = preview::load(&path, &cancel_token).await {
+            let _ = messages.send(Message::PreviewReady(path, payload));
+        }
     });
 }
 
@@ -170,5 +184,38 @@ mod tests {
             Message::RecursiveCountFinished(None) => {}
             other => panic!("expected a cancelled (None) result, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_preview_forwards_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "preview me").unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_preview(path.clone(), CancellationToken::new(), tx);
+
+        match rx.recv().await.expect("channel closed without a result") {
+            Message::PreviewReady(ready_path, crate::preview::PreviewPayload::Text { content, truncated }) => {
+                assert_eq!(ready_path, path);
+                assert_eq!(content, "preview me");
+                assert!(!truncated);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_preview_sends_nothing_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "preview me").unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_preview(path, cancel, tx);
+
+        assert!(rx.recv().await.is_none());
     }
 }
