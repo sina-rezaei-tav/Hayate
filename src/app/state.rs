@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::fs::FileEntry;
@@ -11,10 +12,17 @@ pub struct AppState {
     /// pane. Empty (rather than `Option`) when `current_dir` has no parent
     /// (filesystem root) or the scan simply hasn't delivered anything yet.
     pub parent_entries: Vec<FileEntry>,
-    /// Index into `entries` of the highlighted item. Not `Option<usize>`:
-    /// an empty list and "nothing selected" are the same rendering case,
-    /// so callers just check `entries.is_empty()` rather than unwrapping.
+    /// Intended highlight index into `entries`. May temporarily sit past
+    /// `entries.len()` while a scan is still streaming in; use
+    /// [`selected_index`](Self::selected_index) / [`selected_entry`](Self::selected_entry)
+    /// to read a clamped value.
     pub selected: usize,
+    /// Last highlighted index per visited directory, restored on revisit.
+    pub history: HashMap<PathBuf, usize>,
+    /// Incremented on every directory change. Scan messages carry the
+    /// generation they were started with so a cancelled walk cannot apply
+    /// late batches to the new listing.
+    pub scan_generation: u64,
     /// Result of the last recursive file count (triggered by pressing 'r'),
     /// if one has completed.
     pub recursive_file_count: Option<u64>,
@@ -30,14 +38,25 @@ impl AppState {
             entries: Vec::new(),
             parent_entries: Vec::new(),
             selected: 0,
+            history: HashMap::new(),
+            scan_generation: 0,
             recursive_file_count: None,
             is_counting_recursively: false,
         }
     }
 
+    /// Clamped highlight index, or `None` if the list is empty.
+    pub fn selected_index(&self) -> Option<usize> {
+        if self.entries.is_empty() {
+            None
+        } else {
+            Some(self.selected.min(self.entries.len() - 1))
+        }
+    }
+
     /// The currently highlighted entry, or `None` if the list is empty.
     pub fn selected_entry(&self) -> Option<&FileEntry> {
-        self.entries.get(self.selected)
+        self.selected_index().and_then(|i| self.entries.get(i))
     }
 }
 
@@ -80,5 +99,19 @@ mod tests {
         state.selected = 1;
 
         assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
+    }
+
+    #[test]
+    fn selected_index_clamps_until_the_scan_catches_up() {
+        let mut state = AppState::new("/tmp".into());
+        state.selected = 10;
+        state.entries = vec![
+            FileEntry::new("/tmp/a.txt".into(), false, 0),
+            FileEntry::new("/tmp/b.txt".into(), false, 0),
+        ];
+
+        assert_eq!(state.selected_index(), Some(1));
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
+        assert_eq!(state.selected, 10, "the intended index is kept for later batches");
     }
 }

@@ -13,9 +13,22 @@ use crate::fs;
 use super::message::Message;
 
 /// Spawns the directory scanner for `path`, forwarding each batch (and a
-/// final `ScanFinished`) onto `messages`.
-pub fn spawn_scan(path: PathBuf, cancel_token: CancellationToken, messages: UnboundedSender<Message>) {
-    spawn_scan_forwarding(path, cancel_token, messages, Message::ScanBatch, Message::ScanFinished);
+/// final `ScanFinished`) onto `messages`, tagged with `generation` so the
+/// reducer can drop results from a scan the user has already navigated away
+/// from.
+pub fn spawn_scan(
+    path: PathBuf,
+    cancel_token: CancellationToken,
+    generation: u64,
+    messages: UnboundedSender<Message>,
+) {
+    spawn_scan_forwarding(
+        path,
+        cancel_token,
+        messages,
+        move |batch| Message::ScanBatch(generation, batch),
+        Message::ScanFinished(generation),
+    );
 }
 
 /// Spawns the directory scanner for `path` (intended to be `current_dir`'s
@@ -24,14 +37,15 @@ pub fn spawn_scan(path: PathBuf, cancel_token: CancellationToken, messages: Unbo
 pub fn spawn_parent_scan(
     path: PathBuf,
     cancel_token: CancellationToken,
+    generation: u64,
     messages: UnboundedSender<Message>,
 ) {
     spawn_scan_forwarding(
         path,
         cancel_token,
         messages,
-        Message::ParentScanBatch,
-        Message::ParentScanFinished,
+        move |batch| Message::ParentScanBatch(generation, batch),
+        Message::ParentScanFinished(generation),
     );
 }
 
@@ -87,16 +101,16 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_scan(dir.path().to_path_buf(), CancellationToken::new(), tx);
+        spawn_scan(dir.path().to_path_buf(), CancellationToken::new(), 0, tx);
 
         let mut saw_batch = false;
         loop {
             match rx.recv().await.expect("channel closed before ScanFinished") {
-                Message::ScanBatch(batch) => {
+                Message::ScanBatch(0, batch) => {
                     saw_batch = true;
                     assert!(!batch.is_empty());
                 }
-                Message::ScanFinished => break,
+                Message::ScanFinished(0) => break,
                 other => panic!("unexpected message: {other:?}"),
             }
         }
@@ -109,16 +123,16 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_parent_scan(dir.path().to_path_buf(), CancellationToken::new(), tx);
+        spawn_parent_scan(dir.path().to_path_buf(), CancellationToken::new(), 0, tx);
 
         let mut saw_batch = false;
         loop {
             match rx.recv().await.expect("channel closed before ParentScanFinished") {
-                Message::ParentScanBatch(batch) => {
+                Message::ParentScanBatch(0, batch) => {
                     saw_batch = true;
                     assert!(!batch.is_empty());
                 }
-                Message::ParentScanFinished => break,
+                Message::ParentScanFinished(0) => break,
                 other => panic!("unexpected message: {other:?}"),
             }
         }

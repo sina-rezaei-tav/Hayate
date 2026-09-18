@@ -18,6 +18,10 @@ pub enum Command {
     SelectPrevious,
     /// Moves the highlighted entry in the "current" pane down one.
     SelectNext,
+    /// Enters the highlighted directory (`l` / Right / Enter).
+    EnterDirectory,
+    /// Moves up to the parent directory (`h` / Left / Backspace).
+    OpenParent,
 }
 
 /// Looks up which `Command`, if any, `key` should trigger.
@@ -40,6 +44,12 @@ pub fn command_for_key(key: KeyEvent) -> Option<Command> {
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Command::Cancel),
         (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::NONE) => Some(Command::SelectPrevious),
         (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::NONE) => Some(Command::SelectNext),
+        (KeyCode::Right | KeyCode::Enter | KeyCode::Char('l'), KeyModifiers::NONE) => {
+            Some(Command::EnterDirectory)
+        }
+        (KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h'), KeyModifiers::NONE) => {
+            Some(Command::OpenParent)
+        }
         _ => None,
     }
 }
@@ -151,6 +161,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn l_enter_and_right_enter_directory() {
+        for code in [KeyCode::Char('l'), KeyCode::Enter, KeyCode::Right] {
+            assert_eq!(
+                command_for_key(key(code, KeyModifiers::NONE)),
+                Some(Command::EnterDirectory),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn h_backspace_and_left_open_parent() {
+        for code in [KeyCode::Char('h'), KeyCode::Backspace, KeyCode::Left] {
+            assert_eq!(
+                command_for_key(key(code, KeyModifiers::NONE)),
+                Some(Command::OpenParent),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_h_and_l_do_not_navigate() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('h'), KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('l'), KeyModifiers::SHIFT)),
+            None
+        );
+    }
+
     /// Exhaustively sweeps every letter against every defined modifier
     /// combination (`KeyModifiers` has 6 real bits) and checks the exact
     /// expected `Command`, positive and negative, in one table-driven test.
@@ -165,6 +209,8 @@ mod tests {
                 let is_bare_r = c == 'r' && modifiers == KeyModifiers::NONE;
                 let is_bare_k = c == 'k' && modifiers == KeyModifiers::NONE;
                 let is_bare_j = c == 'j' && modifiers == KeyModifiers::NONE;
+                let is_bare_l = c == 'l' && modifiers == KeyModifiers::NONE;
+                let is_bare_h = c == 'h' && modifiers == KeyModifiers::NONE;
 
                 let expected = if is_bare_q || is_ctrl_c {
                     Some(Command::Quit)
@@ -174,6 +220,10 @@ mod tests {
                     Some(Command::SelectPrevious)
                 } else if is_bare_j {
                     Some(Command::SelectNext)
+                } else if is_bare_l {
+                    Some(Command::EnterDirectory)
+                } else if is_bare_h {
+                    Some(Command::OpenParent)
                 } else {
                     None
                 };

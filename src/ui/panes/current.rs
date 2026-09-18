@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .enumerate()
         .map(|(index, entry)| {
             let label = entry_label(entry);
-            let style = if index == state.selected {
+            let style = if Some(index) == state.selected_index() {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
                 Style::default()
