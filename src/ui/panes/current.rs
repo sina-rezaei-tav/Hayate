@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::app::AppState;
 
@@ -17,22 +17,32 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     );
     let block = Block::default().borders(Borders::ALL).title(title);
 
-    let items: Vec<ListItem> = state
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let label = entry_label(entry);
-            let style = if Some(index) == state.selected_index() {
-                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(label)).style(style)
-        })
-        .collect();
+    let (items, selected) = if let Some(err) = &state.current_scan_error {
+        (
+            vec![ListItem::new(Line::from(format!("scan failed: {err}")))],
+            None,
+        )
+    } else {
+        let items: Vec<ListItem> = state
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let label = entry_label(entry);
+                let style = if Some(index) == state.selected_index() {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(label)).style(style)
+            })
+            .collect();
+        (items, state.selected_index())
+    };
 
-    frame.render_widget(List::new(items).block(block), area);
+    let mut list_state = ListState::default();
+    list_state.select(selected);
+    frame.render_stateful_widget(List::new(items).block(block), area, &mut list_state);
 }
 
 fn entry_label(entry: &crate::fs::FileEntry) -> String {
@@ -154,6 +164,40 @@ mod tests {
         let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 30, 6));
 
         assert!(rows.iter().any(|(text, _)| text.contains("sub/")));
+    }
+
+    #[test]
+    fn selected_entry_stays_visible_when_it_is_past_the_pane_height() {
+        let mut state = AppState::new("/tmp".into());
+        state.entries = (0..20)
+            .map(|i| FileEntry::new(format!("/tmp/file-{i:02}").into(), false, 0))
+            .collect();
+        state.selected = 19;
+
+        let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 30, 6));
+        let visible: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|(text, reversed)| text.contains("file-19") && *reversed),
+            "highlight is off-screen; visible rows were {visible:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_scan_is_not_rendered_as_an_empty_folder() {
+        let mut state = AppState::new("/definitely/does/not/exist".into());
+        state.current_scan_error = Some("No such file or directory".into());
+        let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 50, 8));
+        let visible: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+        let blob = visible.join(" ");
+
+        assert!(
+            blob.contains("failed")
+                || blob.contains("not found")
+                || blob.contains("unreadable")
+                || blob.contains("error"),
+            "missing/unreadable directory looks like a normal empty folder: {visible:?}"
+        );
     }
 
     #[test]

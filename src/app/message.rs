@@ -18,13 +18,18 @@ pub enum Message {
     ScanBatch(u64, Vec<FileEntry>),
     /// The current directory's scanner has sent its last batch.
     ScanFinished(u64),
+    /// `read_dir` failed for the current directory.
+    ScanFailed(u64, String),
     /// A batch of entries from the parent directory's scanner.
     ParentScanBatch(u64, Vec<FileEntry>),
     /// The parent directory's scanner has sent its last batch.
     ParentScanFinished(u64),
-    /// The recursive file counter finished. `None` means the task was
-    /// aborted or panicked before producing a result.
-    RecursiveCountFinished(Option<u64>),
+    /// `read_dir` failed for the parent directory.
+    ParentScanFailed(u64, String),
+    /// The recursive file counter finished. The generation must match
+    /// `AppState::count_generation`; `None` means the task was aborted or
+    /// panicked before producing a result.
+    RecursiveCountFinished(u64, Option<u64>),
     /// A background preview read finished for `path`. Applied only if that
     /// path is still the highlighted file.
     PreviewReady(PathBuf, PreviewPayload),
@@ -35,21 +40,40 @@ pub enum Message {
 pub fn update(state: &mut AppState, message: Message) {
     match message {
         Message::ScanBatch(generation, batch) if generation == state.scan_generation => {
+            let follow = state.selected_entry().map(|entry| entry.name.clone());
             state.entries.extend(batch);
+            crate::fs::sort_listing(&mut state.entries);
+            state.sync_selection_after_listing_change(follow.as_deref());
         }
         Message::ParentScanBatch(generation, batch) if generation == state.scan_generation => {
             state.parent_entries.extend(batch);
+            crate::fs::sort_listing(&mut state.parent_entries);
+        }
+        Message::ScanFinished(generation) if generation == state.scan_generation => {
+            state.current_listing_complete = true;
+        }
+        Message::ParentScanFinished(generation) if generation == state.scan_generation => {
+            state.parent_listing_complete = true;
+        }
+        Message::ScanFailed(generation, err) if generation == state.scan_generation => {
+            state.current_scan_error = Some(err);
+        }
+        Message::ParentScanFailed(generation, err) if generation == state.scan_generation => {
+            state.parent_scan_error = Some(err);
         }
         Message::ScanBatch(_, _)
         | Message::ScanFinished(_)
+        | Message::ScanFailed(_, _)
         | Message::ParentScanBatch(_, _)
-        | Message::ParentScanFinished(_) => {}
-        Message::RecursiveCountFinished(count) => {
+        | Message::ParentScanFinished(_)
+        | Message::ParentScanFailed(_, _) => {}
+        Message::RecursiveCountFinished(generation, count) if generation == state.count_generation => {
             state.is_counting_recursively = false;
             if let Some(count) = count {
                 state.recursive_file_count = Some(count);
             }
         }
+        Message::RecursiveCountFinished(_, _) => {}
         Message::PreviewReady(path, payload) => {
             let still_selected = state
                 .selected_entry()
@@ -91,11 +115,35 @@ mod tests {
     }
 
     #[test]
+    fn scan_batches_are_kept_sorted_dirs_first_then_by_name() {
+        fn names(state: &AppState) -> Vec<&str> {
+            state.entries.iter().map(|entry| entry.name.as_str()).collect()
+        }
+
+        let mut state = state();
+        update(
+            &mut state,
+            Message::ScanBatch(
+                0,
+                vec![
+                    FileEntry::new("/tmp/z.txt".into(), false, 0),
+                    FileEntry::new("/tmp/m".into(), true, 0),
+                    FileEntry::new("/tmp/a.txt".into(), false, 0),
+                    FileEntry::new("/tmp/b".into(), true, 0),
+                ],
+            ),
+        );
+
+        assert_eq!(names(&state), ["b", "m", "a.txt", "z.txt"]);
+    }
+
+    #[test]
     fn scan_finished_does_not_touch_entries() {
         let mut state = state();
         update(&mut state, Message::ScanBatch(0, vec![entry()]));
         update(&mut state, Message::ScanFinished(0));
         assert_eq!(state.entries.len(), 1);
+        assert!(state.current_listing_complete);
     }
 
     #[test]
@@ -112,6 +160,7 @@ mod tests {
         update(&mut state, Message::ParentScanBatch(0, vec![entry()]));
         update(&mut state, Message::ParentScanFinished(0));
         assert_eq!(state.parent_entries.len(), 1);
+        assert!(state.parent_listing_complete);
     }
 
     #[test]
@@ -133,7 +182,7 @@ mod tests {
         let mut state = state();
         state.is_counting_recursively = true;
 
-        update(&mut state, Message::RecursiveCountFinished(Some(42)));
+        update(&mut state, Message::RecursiveCountFinished(0, Some(42)));
 
         assert_eq!(state.recursive_file_count, Some(42));
         assert!(!state.is_counting_recursively);
@@ -145,10 +194,28 @@ mod tests {
         state.is_counting_recursively = true;
         state.recursive_file_count = Some(10);
 
-        update(&mut state, Message::RecursiveCountFinished(None));
+        update(&mut state, Message::RecursiveCountFinished(0, None));
 
         assert_eq!(state.recursive_file_count, Some(10));
         assert!(!state.is_counting_recursively);
+    }
+
+    #[test]
+    fn stale_recursive_count_finished_does_not_clear_a_newer_count() {
+        let mut state = state();
+        state.is_counting_recursively = true;
+        state.count_generation = 2;
+
+        update(&mut state, Message::RecursiveCountFinished(1, None));
+
+        assert!(state.is_counting_recursively);
+    }
+
+    #[test]
+    fn scan_failed_records_an_error() {
+        let mut state = state();
+        update(&mut state, Message::ScanFailed(0, "permission denied".into()));
+        assert_eq!(state.current_scan_error.as_deref(), Some("permission denied"));
     }
 
     #[test]

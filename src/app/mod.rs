@@ -58,13 +58,24 @@ impl LoopCtl {
     /// Cancels in-flight directory scans (and any recursive count of the
     /// old path), then starts whatever `plan` asks for under a fresh child
     /// token of `app_cancel`.
-    fn apply_scan_plan(&mut self, state: &AppState, plan: ScanPlan) {
+    fn apply_scan_plan(&mut self, state: &mut AppState, plan: ScanPlan) {
         self.scan_cancel.cancel();
         self.scan_cancel = self.app_cancel.child_token();
         if let Some(token) = self.active_job_cancel.take() {
             token.cancel();
         }
         self.cancel_preview();
+
+        if plan.current.is_some() {
+            state.entries.clear();
+            state.current_listing_complete = false;
+            state.current_scan_error = None;
+        }
+        if plan.parent.is_some() {
+            state.parent_entries.clear();
+            state.parent_listing_complete = false;
+            state.parent_scan_error = None;
+        }
 
         let generation = state.scan_generation;
         if let Some(path) = plan.current {
@@ -98,7 +109,8 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
     let (message_tx, mut messages) = mpsc::unbounded_channel();
     let mut ctl = LoopCtl::new(app_cancel.clone(), message_tx);
 
-    ctl.apply_scan_plan(&state, navigation::initial_scan_plan(&state));
+    let plan = navigation::initial_scan_plan(&state);
+    ctl.apply_scan_plan(&mut state, plan);
 
     let result = loop {
         if state.should_quit {
@@ -128,20 +140,29 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
                 }
             }
             Some(message) = messages.recv() => {
-                if matches!(message, Message::RecursiveCountFinished(_)) {
-                    ctl.active_job_cancel = None;
-                }
-                if matches!(message, Message::PreviewReady(_, _)) {
-                    ctl.preview_cancel = None;
-                }
-                update(&mut state, message);
-                request_preview_if_needed(&mut state, &mut ctl);
+                handle_message(&mut state, &mut ctl, message);
             }
         }
     };
 
     app_cancel.cancel();
     result
+}
+
+/// Applies one background `Message`. Extracted from `run` so the stale-job
+/// claims can be tested against the same control-token cleanup the loop uses.
+fn handle_message(state: &mut AppState, ctl: &mut LoopCtl, message: Message) {
+    match &message {
+        Message::RecursiveCountFinished(generation, _) if *generation == state.count_generation => {
+            ctl.active_job_cancel = None;
+        }
+        Message::PreviewReady(path, _) if state.preview.path() == Some(path.as_path()) => {
+            ctl.preview_cancel = None;
+        }
+        _ => {}
+    }
+    update(state, message);
+    request_preview_if_needed(state, ctl);
 }
 
 fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
@@ -153,9 +174,11 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
             }
             let job_token = ctl.app_cancel.child_token();
             state.is_counting_recursively = true;
+            state.count_generation = state.count_generation.wrapping_add(1);
             jobs::spawn_recursive_count(
                 state.current_dir.clone(),
                 job_token.clone(),
+                state.count_generation,
                 ctl.messages.clone(),
             );
             ctl.active_job_cancel = Some(job_token);
@@ -163,15 +186,19 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
         Command::Cancel => {
             if let Some(token) = ctl.active_job_cancel.take() {
                 token.cancel();
+                state.count_generation = state.count_generation.wrapping_add(1);
             }
             state.is_counting_recursively = false;
         }
         Command::SelectPrevious => {
-            state.selected = state.selected.saturating_sub(1);
+            let current = state.selected_index().unwrap_or(0);
+            state.selected = current.saturating_sub(1);
         }
         Command::SelectNext => {
-            if state.selected + 1 < state.entries.len() {
-                state.selected += 1;
+            if let Some(index) = state.selected_index()
+                && index + 1 < state.entries.len()
+            {
+                state.selected = index + 1;
             }
         }
         Command::EnterDirectory => {
@@ -289,7 +316,7 @@ mod tests {
         assert!(state.is_counting_recursively);
         assert!(ctl.active_job_cancel.is_some());
         let message = rx.recv().await.expect("job should report back");
-        assert!(matches!(message, Message::RecursiveCountFinished(_)));
+        assert!(matches!(message, Message::RecursiveCountFinished(_, _)));
     }
 
     #[test]
@@ -353,6 +380,48 @@ mod tests {
         run_command(Command::SelectNext, &mut state, &mut ctl);
 
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn select_previous_moves_the_visible_highlight_when_selected_is_past_the_end() {
+        let mut state = state_with_entries(3);
+        state.selected = 10;
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::SelectPrevious, &mut state, &mut ctl);
+
+        assert_eq!(
+            state.selected_index(),
+            Some(1),
+            "k should move off the last visible row, not decrement a stored index that is already off the end (selected={})",
+            state.selected
+        );
+    }
+
+    #[test]
+    fn a_stale_recount_finished_does_not_abort_a_newer_count() {
+        let mut state = state();
+        state.is_counting_recursively = true;
+        state.count_generation = 1;
+        let (mut ctl, _rx) = ctl();
+        let live = ctl.app_cancel.child_token();
+        ctl.active_job_cancel = Some(live.clone());
+
+        handle_message(
+            &mut state,
+            &mut ctl,
+            Message::RecursiveCountFinished(0, None),
+        );
+
+        assert!(
+            state.is_counting_recursively,
+            "a cancelled older count cleared the in-progress flag"
+        );
+        assert!(
+            ctl.active_job_cancel.is_some(),
+            "a cancelled older count dropped the live cancel token"
+        );
+        assert!(!live.is_cancelled());
     }
 
     #[tokio::test]

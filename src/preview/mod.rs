@@ -82,9 +82,44 @@ pub async fn load(path: &Path, cancel: &CancellationToken) -> Option<PreviewPayl
     }
 
     Some(PreviewPayload::Text {
-        content: String::from_utf8_lossy(&buf).into_owned(),
+        content: sanitize_for_preview(&String::from_utf8_lossy(&buf)),
         truncated,
     })
+}
+
+/// Makes file bytes safe to paint in a terminal. Tabs have display width 0
+/// in Ratatui, so they skip cells and leave the previous file's characters
+/// showing through (`.viminfo` is full of them). Other control characters
+/// are replaced with spaces; newlines are kept.
+pub(crate) fn sanitize_for_preview(text: &str) -> String {
+    const TAB_WIDTH: usize = 8;
+    let mut out = String::with_capacity(text.len());
+    let mut column = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\n' => {
+                out.push('\n');
+                column = 0;
+            }
+            '\r' => {}
+            '\t' => {
+                let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+                for _ in 0..spaces {
+                    out.push(' ');
+                }
+                column += spaces;
+            }
+            ch if ch.is_control() => {
+                out.push(' ');
+                column += 1;
+            }
+            ch => {
+                out.push(ch);
+                column += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -158,5 +193,27 @@ mod tests {
     #[test]
     fn idle_has_no_path() {
         assert!(FilePreview::Idle.path().is_none());
+    }
+
+    #[test]
+    fn tabs_expand_to_spaces_so_they_cannot_punch_holes_in_the_preview() {
+        assert_eq!(sanitize_for_preview("\thello"), "        hello");
+        assert_eq!(sanitize_for_preview("ab\tc"), "ab      c");
+    }
+
+    #[tokio::test]
+    async fn viminfo_style_tabs_are_expanded_when_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".viminfo");
+        std::fs::write(&path, "\"\tCHAR\t0\n\tGRUB\n|1,4\n").unwrap();
+
+        match load(&path, &CancellationToken::new()).await.unwrap() {
+            PreviewPayload::Text { content, .. } => {
+                assert!(!content.contains('\t'), "raw tab survived: {content:?}");
+                assert!(content.contains("CHAR"));
+                assert!(content.contains("GRUB"));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 }
