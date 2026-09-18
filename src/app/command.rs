@@ -14,6 +14,10 @@ pub enum Command {
     /// (e.g. a recursive count started by accident), without quitting the
     /// app or touching the always-running directory scan.
     Cancel,
+    /// Moves the highlighted entry in the "current" pane up one.
+    SelectPrevious,
+    /// Moves the highlighted entry in the "current" pane down one.
+    SelectNext,
 }
 
 /// Looks up which `Command`, if any, `key` should trigger.
@@ -34,6 +38,8 @@ pub fn command_for_key(key: KeyEvent) -> Option<Command> {
         }
         (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Command::RecountRecursive),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Command::Cancel),
+        (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::NONE) => Some(Command::SelectPrevious),
+        (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::NONE) => Some(Command::SelectNext),
         _ => None,
     }
 }
@@ -109,6 +115,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn up_and_k_select_previous() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(Command::SelectPrevious)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Some(Command::SelectPrevious)
+        );
+    }
+
+    #[test]
+    fn down_and_j_select_next() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(Command::SelectNext)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(Command::SelectNext)
+        );
+    }
+
+    #[test]
+    fn modified_j_and_k_do_not_move_selection() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('j'), KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('k'), KeyModifiers::SHIFT)),
+            None
+        );
+    }
+
     /// Exhaustively sweeps every letter against every defined modifier
     /// combination (`KeyModifiers` has 6 real bits) and checks the exact
     /// expected `Command`, positive and negative, in one table-driven test.
@@ -121,11 +163,17 @@ mod tests {
                 let is_bare_q = c == 'q' && modifiers == KeyModifiers::NONE;
                 let is_ctrl_c = c == 'c' && modifiers.contains(KeyModifiers::CONTROL);
                 let is_bare_r = c == 'r' && modifiers == KeyModifiers::NONE;
+                let is_bare_k = c == 'k' && modifiers == KeyModifiers::NONE;
+                let is_bare_j = c == 'j' && modifiers == KeyModifiers::NONE;
 
                 let expected = if is_bare_q || is_ctrl_c {
                     Some(Command::Quit)
                 } else if is_bare_r {
                     Some(Command::RecountRecursive)
+                } else if is_bare_k {
+                    Some(Command::SelectPrevious)
+                } else if is_bare_j {
+                    Some(Command::SelectNext)
                 } else {
                     None
                 };

@@ -15,14 +15,43 @@ use super::message::Message;
 /// Spawns the directory scanner for `path`, forwarding each batch (and a
 /// final `ScanFinished`) onto `messages`.
 pub fn spawn_scan(path: PathBuf, cancel_token: CancellationToken, messages: UnboundedSender<Message>) {
+    spawn_scan_forwarding(path, cancel_token, messages, Message::ScanBatch, Message::ScanFinished);
+}
+
+/// Spawns the directory scanner for `path` (intended to be `current_dir`'s
+/// parent), forwarding each batch (and a final `ParentScanFinished`) onto
+/// `messages`.
+pub fn spawn_parent_scan(
+    path: PathBuf,
+    cancel_token: CancellationToken,
+    messages: UnboundedSender<Message>,
+) {
+    spawn_scan_forwarding(
+        path,
+        cancel_token,
+        messages,
+        Message::ParentScanBatch,
+        Message::ParentScanFinished,
+    );
+}
+
+/// Shared plumbing behind `spawn_scan`/`spawn_parent_scan`: only the
+/// `Message` variants they wrap results in differ.
+fn spawn_scan_forwarding(
+    path: PathBuf,
+    cancel_token: CancellationToken,
+    messages: UnboundedSender<Message>,
+    make_batch: impl Fn(Vec<crate::fs::FileEntry>) -> Message + Send + 'static,
+    finished: Message,
+) {
     let mut results = fs::scan_directory(path, cancel_token);
     tokio::spawn(async move {
         while let Some(batch) = results.recv().await {
-            if messages.send(Message::ScanBatch(batch)).is_err() {
+            if messages.send(make_batch(batch)).is_err() {
                 return; // App is shutting down; nothing left to report to.
             }
         }
-        let _ = messages.send(Message::ScanFinished);
+        let _ = messages.send(finished);
     });
 }
 
@@ -68,6 +97,28 @@ mod tests {
                     assert!(!batch.is_empty());
                 }
                 Message::ScanFinished => break,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        assert!(saw_batch);
+    }
+
+    #[tokio::test]
+    async fn spawn_parent_scan_forwards_batches_then_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_parent_scan(dir.path().to_path_buf(), CancellationToken::new(), tx);
+
+        let mut saw_batch = false;
+        loop {
+            match rx.recv().await.expect("channel closed before ParentScanFinished") {
+                Message::ParentScanBatch(batch) => {
+                    saw_batch = true;
+                    assert!(!batch.is_empty());
+                }
+                Message::ParentScanFinished => break,
                 other => panic!("unexpected message: {other:?}"),
             }
         }

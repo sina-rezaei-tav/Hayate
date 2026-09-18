@@ -36,6 +36,11 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
     let (message_tx, mut messages) = mpsc::unbounded_channel();
 
     jobs::spawn_scan(state.current_dir.clone(), cancel_token.clone(), message_tx.clone());
+    if let Some(parent) = state.current_dir.parent() {
+        jobs::spawn_parent_scan(parent.to_path_buf(), cancel_token.clone(), message_tx.clone());
+    }
+    // If `current_dir` has no parent (filesystem root), `parent_entries`
+    // just stays empty - the parent pane renders that as its own case.
 
     // Cancellation token for whichever on-demand job (currently just the
     // recursive count) is running, if any. Kept separate from
@@ -113,11 +118,21 @@ fn run_command(
             }
             state.is_counting_recursively = false;
         }
+        Command::SelectPrevious => {
+            state.selected = state.selected.saturating_sub(1);
+        }
+        Command::SelectNext => {
+            if state.selected + 1 < state.entries.len() {
+                state.selected += 1;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::fs::FileEntry;
+
     use super::*;
 
     fn state() -> AppState {
@@ -208,6 +223,56 @@ mod tests {
 
         assert!(!state.should_quit);
         assert!(active_job_cancel.is_none());
+    }
+
+    fn state_with_entries(count: usize) -> AppState {
+        let mut state = state();
+        state.entries = (0..count)
+            .map(|i| FileEntry::new(format!("/tmp/{i}.txt").into(), false, 0))
+            .collect();
+        state
+    }
+
+    #[test]
+    fn select_previous_stops_at_zero() {
+        let mut state = state_with_entries(3);
+        let cancel_token = CancellationToken::new();
+        let mut active_job_cancel = None;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_command(Command::SelectPrevious, &mut state, &cancel_token, &mut active_job_cancel, &tx);
+        assert_eq!(state.selected, 0);
+
+        state.selected = 2;
+        run_command(Command::SelectPrevious, &mut state, &cancel_token, &mut active_job_cancel, &tx);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn select_next_stops_at_the_last_entry() {
+        let mut state = state_with_entries(3);
+        let cancel_token = CancellationToken::new();
+        let mut active_job_cancel = None;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_command(Command::SelectNext, &mut state, &cancel_token, &mut active_job_cancel, &tx);
+        assert_eq!(state.selected, 1);
+
+        state.selected = 2; // Last valid index for 3 entries.
+        run_command(Command::SelectNext, &mut state, &cancel_token, &mut active_job_cancel, &tx);
+        assert_eq!(state.selected, 2, "must not move past the last entry");
+    }
+
+    #[test]
+    fn select_next_on_empty_entries_does_not_panic_or_move() {
+        let mut state = state(); // No entries.
+        let cancel_token = CancellationToken::new();
+        let mut active_job_cancel = None;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_command(Command::SelectNext, &mut state, &cancel_token, &mut active_job_cancel, &tx);
+
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
