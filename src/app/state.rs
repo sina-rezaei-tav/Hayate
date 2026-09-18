@@ -1,9 +1,17 @@
 use std::path::PathBuf;
 
+use crate::fs::FileEntry;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     pub should_quit: bool,
     pub current_dir: PathBuf,
+    pub entries: Vec<FileEntry>,
+    /// Result of the last recursive file count (triggered by pressing 'r'),
+    /// if one has completed.
+    pub recursive_file_count: Option<u64>,
+    /// Whether a recursive count is currently running in the background.
+    pub is_counting_recursively: bool,
 }
 
 impl AppState {
@@ -11,6 +19,9 @@ impl AppState {
         Self {
             should_quit: false,
             current_dir,
+            entries: Vec::new(),
+            recursive_file_count: None,
+            is_counting_recursively: false,
         }
     }
 }
