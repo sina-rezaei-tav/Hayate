@@ -232,6 +232,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_shorter_dotfile_name_does_not_leave_the_previous_name() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+
+        let mut long = AppState::new("/tmp".into());
+        long.entries = vec![FileEntry::new("/tmp/.gitignore".into(), false, 4)];
+        long.preview = FilePreview::Text {
+            path: PathBuf::from("/tmp/.gitignore"),
+            content: "star".into(),
+            truncated: false,
+        };
+        {
+            let mut frame = terminal.get_frame();
+            let area = frame.area();
+            render(&mut frame, &long, area);
+        }
+
+        let mut short = AppState::new("/tmp".into());
+        short.entries = vec![FileEntry::new("/tmp/.env".into(), false, 1)];
+        short.preview = FilePreview::Text {
+            path: PathBuf::from("/tmp/.env"),
+            content: "x".into(),
+            truncated: false,
+        };
+        {
+            let mut frame = terminal.get_frame();
+            let area = frame.area();
+            render(&mut frame, &short, area);
+        }
+
+        let after = current_buffer_text(&mut terminal);
+        assert!(after.contains(".env"), "new name missing: {after:?}");
+        assert!(
+            !after.contains("ignore"),
+            "leftover from .gitignore: {after:?}"
+        );
+    }
+
     fn current_buffer_text(terminal: &mut Terminal<TestBackend>) -> String {
         terminal
             .current_buffer_mut()

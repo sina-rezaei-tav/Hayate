@@ -399,6 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn select_next_when_selected_is_past_the_end_stays_on_the_last_visible_row() {
+        let mut state = state_with_entries(3);
+        state.selected = 10;
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::SelectNext, &mut state, &mut ctl);
+
+        assert_eq!(
+            state.selected_index(),
+            Some(2),
+            "j must not walk off the listing; the visible highlight is already the last row (selected={})",
+            state.selected
+        );
+    }
+
+    #[test]
     fn a_stale_recount_finished_does_not_abort_a_newer_count() {
         let mut state = state();
         state.is_counting_recursively = true;
@@ -422,6 +438,67 @@ mod tests {
             "a cancelled older count dropped the live cancel token"
         );
         assert!(!live.is_cancelled());
+    }
+
+    #[test]
+    fn cancelling_a_recount_drops_a_late_successful_result() {
+        let mut state = state();
+        state.is_counting_recursively = true;
+        state.count_generation = 1;
+        let (mut ctl, _rx) = ctl();
+        ctl.active_job_cancel = Some(ctl.app_cancel.child_token());
+
+        run_command(Command::Cancel, &mut state, &mut ctl);
+        handle_message(
+            &mut state,
+            &mut ctl,
+            Message::RecursiveCountFinished(1, Some(99)),
+        );
+
+        assert!(!state.is_counting_recursively);
+        assert!(state.recursive_file_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_preview_ready_does_not_drop_the_live_preview_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.txt");
+        let second = dir.path().join("b.txt");
+        std::fs::write(&first, "aaa").unwrap();
+        std::fs::write(&second, "bbb").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.entries = vec![
+            FileEntry::new(first.clone(), false, 3),
+            FileEntry::new(second.clone(), false, 3),
+        ];
+        let (mut ctl, _rx) = ctl();
+
+        request_preview_if_needed(&mut state, &mut ctl);
+        run_command(Command::SelectNext, &mut state, &mut ctl);
+        request_preview_if_needed(&mut state, &mut ctl);
+        let live = ctl.preview_cancel.clone().expect("b.txt preview should be in flight");
+
+        handle_message(
+            &mut state,
+            &mut ctl,
+            Message::PreviewReady(
+                first,
+                crate::preview::PreviewPayload::Text {
+                    content: "stale".into(),
+                    truncated: false,
+                },
+            ),
+        );
+
+        assert!(
+            ctl.preview_cancel.is_some(),
+            "a late preview for a.txt dropped the in-flight token for b.txt"
+        );
+        assert!(!live.is_cancelled());
+        assert!(
+            matches!(state.preview, crate::preview::FilePreview::Loading(ref path) if path == &second)
+        );
     }
 
     #[tokio::test]
@@ -465,6 +542,27 @@ mod tests {
         assert!(recount.is_cancelled());
         assert!(ctl.active_job_cancel.is_none());
         assert!(!state.is_counting_recursively);
+    }
+
+    #[tokio::test]
+    async fn applying_a_current_scan_plan_drops_stale_entries_and_errors() {
+        let mut state = AppState::new("/tmp/project".into());
+        state.entries = vec![FileEntry::new("/tmp/project/stale.txt".into(), false, 0)];
+        state.current_listing_complete = true;
+        state.current_scan_error = Some("old error".into());
+        let (mut ctl, _rx) = ctl();
+
+        ctl.apply_scan_plan(
+            &mut state,
+            ScanPlan {
+                current: Some("/tmp/project/src".into()),
+                parent: None,
+            },
+        );
+
+        assert!(state.entries.is_empty());
+        assert!(!state.current_listing_complete);
+        assert!(state.current_scan_error.is_none());
     }
 
     #[test]

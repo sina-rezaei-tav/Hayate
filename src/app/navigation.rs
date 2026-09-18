@@ -68,7 +68,9 @@ pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
     state.parent_scan_error = None;
     state.selected = select_left_child_or_history(state, &left);
 
-    let rescan_current = state.entries.is_empty() || !state.current_listing_complete;
+    let rescan_current = state.entries.is_empty()
+        || !state.current_listing_complete
+        || state.current_scan_error.is_some();
     Some(ScanPlan {
         current: if rescan_current {
             Some(parent.clone())
@@ -320,5 +322,21 @@ mod tests {
         enter_selected(&mut state).unwrap();
 
         assert!(matches!(state.preview, crate::preview::FilePreview::Idle));
+    }
+
+    #[test]
+    fn returning_to_a_directory_rescans_when_the_reused_listing_failed() {
+        let mut state = state_in_project();
+        state.parent_entries = vec![dir("/tmp/project")];
+        state.parent_listing_complete = true;
+        state.parent_scan_error = Some("permission denied".into());
+
+        let plan = open_parent(&mut state).unwrap();
+
+        assert_eq!(
+            plan.current,
+            Some(PathBuf::from("/tmp")),
+            "reusing a failed parent listing leaves the current pane stuck on the error"
+        );
     }
 }

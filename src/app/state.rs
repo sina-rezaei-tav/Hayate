@@ -205,4 +205,18 @@ mod tests {
 
         assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("z.txt"));
     }
+
+    #[test]
+    fn sync_selection_falls_back_to_history_when_the_followed_name_is_gone() {
+        let mut state = AppState::new("/tmp".into());
+        state.history.insert("/tmp".into(), "b.txt".into());
+        state.entries = vec![
+            FileEntry::new("/tmp/b.txt".into(), false, 0),
+            FileEntry::new("/tmp/z.txt".into(), false, 0),
+        ];
+
+        state.sync_selection_after_listing_change(Some("a.txt"));
+
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
+    }
 }

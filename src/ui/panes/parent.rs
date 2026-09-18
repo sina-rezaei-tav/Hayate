@@ -117,6 +117,42 @@ mod tests {
     }
 
     #[test]
+    fn current_dir_stays_visible_when_it_is_past_the_pane_height() {
+        let mut state = AppState::new("/tmp/dir-19".into());
+        state.parent_entries = (0..20)
+            .map(|i| FileEntry::new(format!("/tmp/dir-{i:02}").into(), true, 0))
+            .collect();
+
+        let rows = rendered_rows(&state, Rect::new(0, 0, 30, 6));
+        let visible: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|(text, reversed)| text.contains("dir-19") && *reversed),
+            "current dir is off-screen; visible rows were {visible:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_parent_scan_is_not_rendered_as_an_empty_folder() {
+        let mut state = AppState::new("/tmp/project".into());
+        state.parent_scan_error = Some("No such file or directory".into());
+        let rows = rendered_rows(&state, Rect::new(0, 0, 50, 8));
+        let blob = rows
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            blob.contains("failed")
+                || blob.contains("not found")
+                || blob.contains("unreadable")
+                || blob.contains("error"),
+            "unreadable parent looks like an empty folder: {rows:?}"
+        );
+    }
+
+    #[test]
     fn does_not_panic_on_degenerate_areas() {
         let state = AppState::new("/tmp".into());
         for area in [Rect::new(0, 0, 0, 0), Rect::new(0, 0, 1, 1)] {

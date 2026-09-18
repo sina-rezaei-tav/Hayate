@@ -264,4 +264,75 @@ mod tests {
 
         assert!(matches!(state.preview, FilePreview::Loading(_)));
     }
+
+    #[test]
+    fn a_scan_batch_restores_the_remembered_file_by_name() {
+        let mut state = state();
+        state.history.insert("/tmp".into(), "b.txt".into());
+
+        update(
+            &mut state,
+            Message::ScanBatch(
+                0,
+                vec![
+                    FileEntry::new("/tmp/z.txt".into(), false, 0),
+                    FileEntry::new("/tmp/a.txt".into(), false, 0),
+                    FileEntry::new("/tmp/b.txt".into(), false, 0),
+                ],
+            ),
+        );
+
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
+    }
+
+    #[test]
+    fn a_count_from_the_previous_directory_is_ignored() {
+        let mut state = state();
+        state.count_generation = 3;
+
+        update(&mut state, Message::RecursiveCountFinished(2, Some(99)));
+
+        assert!(state.recursive_file_count.is_none());
+        assert!(!state.is_counting_recursively);
+    }
+
+    #[test]
+    fn a_live_selection_is_not_overwritten_by_history_when_a_batch_arrives() {
+        let mut state = state();
+        state.history.insert("/tmp".into(), "b.txt".into());
+        state.entries = vec![FileEntry::new("/tmp/a.txt".into(), false, 0)];
+        state.selected = 0;
+
+        update(
+            &mut state,
+            Message::ScanBatch(
+                0,
+                vec![
+                    FileEntry::new("/tmp/z.txt".into(), false, 0),
+                    FileEntry::new("/tmp/b.txt".into(), false, 0),
+                ],
+            ),
+        );
+
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("a.txt"));
+    }
+
+    #[test]
+    fn stale_scan_failed_is_ignored() {
+        let mut state = state();
+        state.scan_generation = 2;
+
+        update(&mut state, Message::ScanFailed(1, "gone".into()));
+        update(&mut state, Message::ParentScanFailed(1, "gone".into()));
+
+        assert!(state.current_scan_error.is_none());
+        assert!(state.parent_scan_error.is_none());
+    }
+
+    #[test]
+    fn parent_scan_failed_records_an_error() {
+        let mut state = state();
+        update(&mut state, Message::ParentScanFailed(0, "permission denied".into()));
+        assert_eq!(state.parent_scan_error.as_deref(), Some("permission denied"));
+    }
 }

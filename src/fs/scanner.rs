@@ -164,6 +164,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listing_includes_hidden_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "visible.txt");
+        write_file(dir.path(), ".viminfo");
+        write_file(dir.path(), ".gitignore");
+
+        let mut receiver = scan_directory(dir.path().to_path_buf(), CancellationToken::new());
+        let mut names = HashSet::new();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => {
+                    for entry in batch {
+                        names.insert(entry.name.to_string());
+                    }
+                }
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
+        }
+
+        assert!(names.contains(".viminfo"), "listing skipped a hidden file: {names:?}");
+        assert!(names.contains(".gitignore"), "listing skipped a hidden file: {names:?}");
+        assert!(names.contains("visible.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_file_is_listed_as_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "real.txt");
+        std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("alias.txt")).unwrap();
+
+        let mut receiver = scan_directory(dir.path().to_path_buf(), CancellationToken::new());
+        let mut listed = Vec::new();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => listed.extend(batch),
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
+        }
+
+        let alias = listed.iter().find(|entry| entry.name == "alias.txt");
+        assert!(
+            matches!(alias, Some(entry) if !entry.is_dir),
+            "symlink-to-file must list as a file so preview and count agree: {listed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn nonexistent_directory_reports_failure_and_does_not_panic() {
         let mut receiver = scan_directory(
             PathBuf::from("/definitely/does/not/exist"),

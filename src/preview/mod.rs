@@ -201,6 +201,13 @@ mod tests {
         assert_eq!(sanitize_for_preview("ab\tc"), "ab      c");
     }
 
+    #[test]
+    fn control_characters_and_carriage_returns_cannot_punch_holes() {
+        assert_eq!(sanitize_for_preview("a\u{0001}b"), "a b");
+        assert_eq!(sanitize_for_preview("a\rb\nc"), "ab\nc");
+        assert!(!sanitize_for_preview("\"\tCHAR\t0").contains('\t'));
+    }
+
     #[tokio::test]
     async fn viminfo_style_tabs_are_expanded_when_loaded() {
         let dir = tempfile::tempdir().unwrap();

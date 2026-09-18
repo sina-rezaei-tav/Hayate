@@ -33,13 +33,16 @@ pub fn count_files_recursive(
 fn walk_and_count(path: &Path, cancel_token: &CancellationToken) -> u64 {
     let mut count = 0u64;
 
-    for entry in WalkDir::new(path) {
+    // skip_hidden defaults to true in jwalk, which would omit `.viminfo`,
+    // `.gitignore`, and everything under `.git` / `.config`. The listing
+    // shows those entries, so the count has to include them.
+    for entry in WalkDir::new(path).skip_hidden(false) {
         if cancel_token.is_cancelled() {
             break;
         }
 
         match entry {
-            Ok(entry) if entry.file_type().is_file() => count += 1,
+            Ok(entry) if is_counted_file(&entry) => count += 1,
             // Directories aren't counted themselves; unreadable entries
             // (permission errors, races with concurrent deletion) are
             // skipped rather than aborting the whole count.
@@ -48,6 +51,16 @@ fn walk_and_count(path: &Path, cancel_token: &CancellationToken) -> u64 {
     }
 
     count
+}
+
+fn is_counted_file(entry: &jwalk::DirEntry<((), ())>) -> bool {
+    let file_type = entry.file_type();
+    if file_type.is_file() {
+        return true;
+    }
+    // The listing treats a symlink-to-file as a file (`metadata` follows).
+    // The walk itself does not follow links, so we still count the link.
+    file_type.is_symlink() && entry.path().is_file()
 }
 
 #[cfg(test)]
@@ -81,6 +94,65 @@ mod tests {
         let count = walk_and_count(dir.path(), &CancellationToken::new());
 
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn counts_hidden_files_and_files_inside_hidden_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "visible.txt");
+        write_file(dir.path(), ".viminfo");
+        write_file(dir.path(), ".gitignore");
+        write_file(dir.path(), ".config/settings.json");
+        write_file(dir.path(), ".git/HEAD");
+        write_file(dir.path(), ".git/objects/ab");
+
+        let count = walk_and_count(dir.path(), &CancellationToken::new());
+
+        assert_eq!(
+            count, 6,
+            "jwalk skips hidden entries by default; the listing shows them, so the count must too"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn counts_a_symlink_to_a_file_as_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "real.txt");
+        std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("alias.txt")).unwrap();
+
+        let count = walk_and_count(dir.path(), &CancellationToken::new());
+
+        assert_eq!(count, 2, "the listing shows a symlink-to-file as a file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_count_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "real.txt");
+        std::os::unix::fs::symlink(dir.path().join("missing.txt"), dir.path().join("broken")).unwrap();
+
+        let count = walk_and_count(dir.path(), &CancellationToken::new());
+
+        assert_eq!(count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "outside.txt");
+        write_file(dir.path(), "realdir/a.txt");
+        write_file(dir.path(), "realdir/b.txt");
+        std::os::unix::fs::symlink(dir.path().join("realdir"), dir.path().join("linkdir")).unwrap();
+
+        let count = walk_and_count(dir.path(), &CancellationToken::new());
+
+        assert_eq!(
+            count, 3,
+            "following symlink dirs would double-count and can loop; count the real files only"
+        );
     }
 
     #[test]
