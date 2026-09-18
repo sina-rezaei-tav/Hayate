@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
 fn recount_status_line(state: &AppState) -> String {
     if state.is_counting_recursively {
-        "Counting files recursively...".to_string()
+        "Counting files recursively... (press Esc to cancel)".to_string()
     } else if let Some(count) = state.recursive_file_count {
         format!("{count} files found recursively (press 'r' to recount)")
     } else {

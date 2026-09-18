@@ -26,16 +26,22 @@ pub fn spawn_scan(path: PathBuf, cancel_token: CancellationToken, messages: Unbo
     });
 }
 
-/// Spawns a recursive file count for `path`, forwarding its result (or
-/// `None` if the task was aborted/panicked) onto `messages`.
+/// Spawns a recursive file count for `path`, forwarding its result onto
+/// `messages`.
+///
+/// Reports `None` if the task was aborted/panicked, *or* if `cancel_token`
+/// was cancelled before it finished: `count_files_recursive` still returns
+/// whatever partial count it had accumulated at the moment it stopped, but
+/// a partial count is not a meaningful answer to "how many files are
+/// there", so it's discarded rather than shown as if it were complete.
 pub fn spawn_recursive_count(
     path: PathBuf,
     cancel_token: CancellationToken,
     messages: UnboundedSender<Message>,
 ) {
-    let receiver = fs::count_files_recursive(path, cancel_token);
+    let receiver = fs::count_files_recursive(path, cancel_token.clone());
     tokio::spawn(async move {
-        let count = receiver.await.ok();
+        let count = receiver.await.ok().filter(|_| !cancel_token.is_cancelled());
         let _ = messages.send(Message::RecursiveCountFinished(count));
     });
 }
@@ -81,6 +87,23 @@ mod tests {
         match rx.recv().await.expect("channel closed without a result") {
             Message::RecursiveCountFinished(Some(count)) => assert_eq!(count, 2),
             other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_recursive_count_discards_a_partial_count_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel(); // Already cancelled before the walk even starts.
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_recursive_count(dir.path().to_path_buf(), cancel_token, tx);
+
+        match rx.recv().await.expect("channel closed without a result") {
+            Message::RecursiveCountFinished(None) => {}
+            other => panic!("expected a cancelled (None) result, got {other:?}"),
         }
     }
 }

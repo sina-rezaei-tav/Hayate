@@ -10,6 +10,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 pub enum Command {
     Quit,
     RecountRecursive,
+    /// Stops whichever on-demand background job is currently running
+    /// (e.g. a recursive count started by accident), without quitting the
+    /// app or touching the always-running directory scan.
+    Cancel,
 }
 
 /// Looks up which `Command`, if any, `key` should trigger.
@@ -29,6 +33,7 @@ pub fn command_for_key(key: KeyEvent) -> Option<Command> {
             Some(Command::Quit)
         }
         (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Command::RecountRecursive),
+        (KeyCode::Esc, KeyModifiers::NONE) => Some(Command::Cancel),
         _ => None,
     }
 }
@@ -84,6 +89,22 @@ mod tests {
     fn modified_r_does_not_trigger_recount() {
         assert_eq!(
             command_for_key(key(KeyCode::Char('r'), KeyModifiers::SHIFT)),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_esc_triggers_cancel() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Command::Cancel)
+        );
+    }
+
+    #[test]
+    fn modified_esc_does_not_trigger_cancel() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Esc, KeyModifiers::SHIFT)),
             None
         );
     }
