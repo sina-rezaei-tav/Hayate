@@ -1,133 +1,138 @@
 //! Central application state and the main event/render loop.
+//!
+//! Every background job (directory scan, recursive count, and anything
+//! added later) reports its results through one shared `Message` channel,
+//! so `run`'s `select!` never has to grow past two arms as features are
+//! added. See `message` for the job -> state "reducer", `command` for the
+//! key -> intent lookup, and `jobs` for spawning.
 
+pub mod command;
+pub mod jobs;
+pub mod message;
 pub mod state;
 
 pub use state::AppState;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::Event;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use command::{Command, command_for_key};
+use message::{Message, update};
 
 use crate::event::{AppEvent, EventHandler};
 use crate::ui;
 use crate::util::Tui;
 
 /// Drives the app until `state.should_quit` is set: draws a frame, then
-/// waits for the next `AppEvent` and applies it to `state`.
+/// waits for either the next terminal `AppEvent` or the next `Message`
+/// from a background job.
 ///
 /// Takes `tui` by reference (rather than owning it) so the caller keeps
 /// control of it and can call `Tui::restore` after `run` returns, whether it
 /// returned `Ok` or `Err`.
 pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -> anyhow::Result<()> {
-    while !state.should_quit {
-        tui.draw(|frame| ui::render(frame, &state))?;
+    let cancel_token = CancellationToken::new();
+    let (message_tx, mut messages) = mpsc::unbounded_channel();
 
-        match events.next().await? {
-            AppEvent::Tick => {}
-            AppEvent::Input(Event::Key(key)) => handle_key(&mut state, key),
-            AppEvent::Input(_) => {}
-            AppEvent::Error(message) => return Err(anyhow::anyhow!(message)),
+    jobs::spawn_scan(state.current_dir.clone(), cancel_token.clone(), message_tx.clone());
+
+    let result = loop {
+        if state.should_quit {
+            break Ok(());
         }
-    }
 
-    Ok(())
+        if let Err(err) = tui.draw(|frame| ui::render(frame, &state)) {
+            break Err(err.into());
+        }
+
+        tokio::select! {
+            event = events.next() => {
+                match event {
+                    Ok(AppEvent::Input(Event::Key(key))) => {
+                        if let Some(command) = command_for_key(key) {
+                            run_command(command, &mut state, &cancel_token, &message_tx);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => break Err(err),
+                }
+            }
+            Some(message) = messages.recv() => update(&mut state, message),
+        }
+    };
+
+    cancel_token.cancel();
+    result
 }
 
-/// Applies a key event to `state`.
-///
-/// Ignores everything but `Press`: without this, Windows (and Unix
-/// terminals with the Kitty keyboard protocol enabled) also deliver
-/// `Release`/`Repeat` for the same physical keystroke, which would
-/// double-apply whatever action the key maps to.
-fn handle_key(state: &mut AppState, key: KeyEvent) {
-    if key.kind != KeyEventKind::Press {
-        return;
-    }
-
-    let is_quit_key = (key.modifiers == KeyModifiers::NONE && matches!(key.code, KeyCode::Char('q')))
-        || (key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')));
-
-    if is_quit_key {
-        state.should_quit = true;
+/// Carries out `command`: either mutates `state` directly, or spawns a
+/// background job that will report back through `messages`.
+fn run_command(
+    command: Command,
+    state: &mut AppState,
+    cancel_token: &CancellationToken,
+    messages: &mpsc::UnboundedSender<Message>,
+) {
+    match command {
+        Command::Quit => state.should_quit = true,
+        Command::RecountRecursive => {
+            if state.is_counting_recursively {
+                return; // Already running; let it finish.
+            }
+            state.is_counting_recursively = true;
+            jobs::spawn_recursive_count(
+                state.current_dir.clone(),
+                cancel_token.clone(),
+                messages.clone(),
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyEventKind;
-
     use super::*;
 
     fn state() -> AppState {
         AppState::new("/tmp".into())
     }
 
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
-    fn key_with_kind(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
-        KeyEvent::new_with_kind(code, modifiers, kind)
-    }
-
     #[test]
-    fn q_quits() {
+    fn quit_command_sets_should_quit() {
         let mut state = state();
-        handle_key(&mut state, key(KeyCode::Char('q'), KeyModifiers::NONE));
+        let cancel_token = CancellationToken::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_command(Command::Quit, &mut state, &cancel_token, &tx);
+
         assert!(state.should_quit);
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn recount_command_is_a_noop_while_already_counting() {
         let mut state = state();
-        handle_key(&mut state, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(state.should_quit);
+        state.is_counting_recursively = true;
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        run_command(Command::RecountRecursive, &mut state, &cancel_token, &tx);
+
+        // No job was spawned, so nothing should ever arrive on the channel.
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 
-    #[test]
-    fn plain_c_does_not_quit() {
-        let mut state = state();
-        handle_key(&mut state, key(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(!state.should_quit);
-    }
+    #[tokio::test]
+    async fn recount_command_starts_a_job_and_sets_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
-    #[test]
-    fn unrelated_keys_do_not_quit() {
-        let mut state = state();
+        run_command(Command::RecountRecursive, &mut state, &cancel_token, &tx);
 
-        for bits in 0..=0b0111_1111 {
-            let modifiers = KeyModifiers::from_bits_truncate(bits);
-
-            for c in ('a'..='z').chain('A'..='Z') {
-                // Exclude exact quit keys safely
-                let is_quit_key = (c == 'q' && modifiers == KeyModifiers::NONE)
-                    || (c == 'c' && modifiers.contains(KeyModifiers::CONTROL));
-
-                if is_quit_key {
-                    continue;
-                }
-
-                handle_key(&mut state, key(KeyCode::Char(c), modifiers));
-                assert!(
-                    !state.should_quit,
-                    "Key combination '{c}' with modifiers {modifiers:?} unexpectedly set should_quit to true"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn release_and_repeat_kinds_are_ignored_even_for_quit_keys() {
-        let mut release = state();
-        handle_key(
-            &mut release,
-            key_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Release),
-        );
-        assert!(!release.should_quit);
-
-        let mut repeat = state();
-        handle_key(
-            &mut repeat,
-            key_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Repeat),
-        );
-        assert!(!repeat.should_quit);
+        assert!(state.is_counting_recursively);
+        let message = rx.recv().await.expect("job should report back");
+        assert!(matches!(message, Message::RecursiveCountFinished(_)));
     }
 }
