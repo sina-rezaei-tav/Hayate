@@ -2,13 +2,22 @@
 //! rendering to each pane. Pure: reads `AppState`, writes to `Frame` only.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::app::AppState;
 
 use super::panes::{current, parent, preview};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
+    let columns = split_panes(frame.area());
+    parent::render(frame, state, columns[0]);
+    current::render(frame, state, columns[1]);
+    preview::render(frame, state, columns[2]);
+}
+
+/// Same 20/40/40 split `render` uses, so preview scrolling can page by the
+/// actual pane size without the UI mutating state.
+pub fn split_panes(area: Rect) -> [Rect; 3] {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -16,11 +25,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Constraint::Percentage(40),
             Constraint::Percentage(40),
         ])
-        .split(frame.area());
-
-    parent::render(frame, state, columns[0]);
-    current::render(frame, state, columns[1]);
-    preview::render(frame, state, columns[2]);
+        .split(area);
+    [columns[0], columns[1], columns[2]]
 }
 
 #[cfg(test)]

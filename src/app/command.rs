@@ -22,6 +22,10 @@ pub enum Command {
     EnterDirectory,
     /// Moves up to the parent directory (`h` / Left / Backspace).
     OpenParent,
+    /// Scrolls the preview pane up by one page.
+    PreviewPageUp,
+    /// Scrolls the preview pane down by one page.
+    PreviewPageDown,
 }
 
 /// Looks up which `Command`, if any, `key` should trigger.
@@ -50,6 +54,10 @@ pub fn command_for_key(key: KeyEvent) -> Option<Command> {
         (KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h'), KeyModifiers::NONE) => {
             Some(Command::OpenParent)
         }
+        (KeyCode::PageUp, KeyModifiers::NONE)
+        | (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Command::PreviewPageUp),
+        (KeyCode::PageDown, KeyModifiers::NONE)
+        | (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Command::PreviewPageDown),
         _ => None,
     }
 }
@@ -195,6 +203,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn page_up_and_ctrl_u_scroll_preview_up() {
+        assert_eq!(
+            command_for_key(key(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(Command::PreviewPageUp)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Some(Command::PreviewPageUp)
+        );
+    }
+
+    #[test]
+    fn page_down_and_ctrl_d_scroll_preview_down() {
+        assert_eq!(
+            command_for_key(key(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(Command::PreviewPageDown)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            Some(Command::PreviewPageDown)
+        );
+    }
+
     /// Exhaustively sweeps every letter against every defined modifier
     /// combination (`KeyModifiers` has 6 real bits) and checks the exact
     /// expected `Command`, positive and negative, in one table-driven test.
@@ -211,6 +243,8 @@ mod tests {
                 let is_bare_j = c == 'j' && modifiers == KeyModifiers::NONE;
                 let is_bare_l = c == 'l' && modifiers == KeyModifiers::NONE;
                 let is_bare_h = c == 'h' && modifiers == KeyModifiers::NONE;
+                let is_ctrl_u = c == 'u' && modifiers == KeyModifiers::CONTROL;
+                let is_ctrl_d = c == 'd' && modifiers == KeyModifiers::CONTROL;
 
                 let expected = if is_bare_q || is_ctrl_c {
                     Some(Command::Quit)
@@ -224,6 +258,10 @@ mod tests {
                     Some(Command::EnterDirectory)
                 } else if is_bare_h {
                     Some(Command::OpenParent)
+                } else if is_ctrl_u {
+                    Some(Command::PreviewPageUp)
+                } else if is_ctrl_d {
+                    Some(Command::PreviewPageDown)
                 } else {
                     None
                 };

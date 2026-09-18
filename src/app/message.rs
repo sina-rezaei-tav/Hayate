@@ -5,7 +5,10 @@
 //! add a variant here, and one match arm in `update`. `app::run`'s loop
 //! itself never has to change.
 
+use std::path::PathBuf;
+
 use crate::fs::FileEntry;
+use crate::preview::{FilePreview, PreviewPayload};
 
 use super::AppState;
 
@@ -22,6 +25,9 @@ pub enum Message {
     /// The recursive file counter finished. `None` means the task was
     /// aborted or panicked before producing a result.
     RecursiveCountFinished(Option<u64>),
+    /// A background preview read finished for `path`. Applied only if that
+    /// path is still the highlighted file.
+    PreviewReady(PathBuf, PreviewPayload),
 }
 
 /// Applies one message to `state`. The single "reducer" for every
@@ -42,6 +48,24 @@ pub fn update(state: &mut AppState, message: Message) {
             state.is_counting_recursively = false;
             if let Some(count) = count {
                 state.recursive_file_count = Some(count);
+            }
+        }
+        Message::PreviewReady(path, payload) => {
+            let still_selected = state
+                .selected_entry()
+                .is_some_and(|entry| !entry.is_dir && entry.path == path);
+            if still_selected {
+                state.preview = match payload {
+                    PreviewPayload::Text { content, truncated } => {
+                        FilePreview::Text {
+                            path,
+                            content,
+                            truncated,
+                        }
+                    }
+                    PreviewPayload::Binary => FilePreview::Binary { path },
+                    PreviewPayload::Error(message) => FilePreview::Error { path, message },
+                };
             }
         }
     }
@@ -125,5 +149,52 @@ mod tests {
 
         assert_eq!(state.recursive_file_count, Some(10));
         assert!(!state.is_counting_recursively);
+    }
+
+    #[test]
+    fn preview_ready_applies_when_that_file_is_still_selected() {
+        let mut state = state();
+        state.entries = vec![FileEntry::new("/tmp/a.txt".into(), false, 0)];
+        state.preview = FilePreview::Loading("/tmp/a.txt".into());
+
+        update(
+            &mut state,
+            Message::PreviewReady(
+                "/tmp/a.txt".into(),
+                PreviewPayload::Text {
+                    content: "hello".into(),
+                    truncated: false,
+                },
+            ),
+        );
+
+        assert!(matches!(
+            state.preview,
+            FilePreview::Text { ref content, .. } if content == "hello"
+        ));
+    }
+
+    #[test]
+    fn preview_ready_is_ignored_after_the_selection_moves() {
+        let mut state = state();
+        state.entries = vec![
+            FileEntry::new("/tmp/a.txt".into(), false, 0),
+            FileEntry::new("/tmp/b.txt".into(), false, 0),
+        ];
+        state.selected = 1;
+        state.preview = FilePreview::Loading("/tmp/b.txt".into());
+
+        update(
+            &mut state,
+            Message::PreviewReady(
+                "/tmp/a.txt".into(),
+                PreviewPayload::Text {
+                    content: "stale".into(),
+                    truncated: false,
+                },
+            ),
+        );
+
+        assert!(matches!(state.preview, FilePreview::Loading(_)));
     }
 }
