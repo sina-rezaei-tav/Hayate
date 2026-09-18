@@ -12,13 +12,13 @@ use super::AppState;
 #[derive(Debug)]
 pub enum Message {
     /// A batch of entries from the current directory's scanner.
-    ScanBatch(Vec<FileEntry>),
+    ScanBatch(u64, Vec<FileEntry>),
     /// The current directory's scanner has sent its last batch.
-    ScanFinished,
+    ScanFinished(u64),
     /// A batch of entries from the parent directory's scanner.
-    ParentScanBatch(Vec<FileEntry>),
+    ParentScanBatch(u64, Vec<FileEntry>),
     /// The parent directory's scanner has sent its last batch.
-    ParentScanFinished,
+    ParentScanFinished(u64),
     /// The recursive file counter finished. `None` means the task was
     /// aborted or panicked before producing a result.
     RecursiveCountFinished(Option<u64>),
@@ -28,10 +28,16 @@ pub enum Message {
 /// background job's output.
 pub fn update(state: &mut AppState, message: Message) {
     match message {
-        Message::ScanBatch(batch) => state.entries.extend(batch),
-        Message::ScanFinished => {}
-        Message::ParentScanBatch(batch) => state.parent_entries.extend(batch),
-        Message::ParentScanFinished => {}
+        Message::ScanBatch(generation, batch) if generation == state.scan_generation => {
+            state.entries.extend(batch);
+        }
+        Message::ParentScanBatch(generation, batch) if generation == state.scan_generation => {
+            state.parent_entries.extend(batch);
+        }
+        Message::ScanBatch(_, _)
+        | Message::ScanFinished(_)
+        | Message::ParentScanBatch(_, _)
+        | Message::ParentScanFinished(_) => {}
         Message::RecursiveCountFinished(count) => {
             state.is_counting_recursively = false;
             if let Some(count) = count {
@@ -56,22 +62,22 @@ mod tests {
     #[test]
     fn scan_batch_extends_entries() {
         let mut state = state();
-        update(&mut state, Message::ScanBatch(vec![entry(), entry()]));
+        update(&mut state, Message::ScanBatch(0, vec![entry(), entry()]));
         assert_eq!(state.entries.len(), 2);
     }
 
     #[test]
     fn scan_finished_does_not_touch_entries() {
         let mut state = state();
-        update(&mut state, Message::ScanBatch(vec![entry()]));
-        update(&mut state, Message::ScanFinished);
+        update(&mut state, Message::ScanBatch(0, vec![entry()]));
+        update(&mut state, Message::ScanFinished(0));
         assert_eq!(state.entries.len(), 1);
     }
 
     #[test]
     fn parent_scan_batch_extends_parent_entries_only() {
         let mut state = state();
-        update(&mut state, Message::ParentScanBatch(vec![entry(), entry()]));
+        update(&mut state, Message::ParentScanBatch(0, vec![entry(), entry()]));
         assert_eq!(state.parent_entries.len(), 2);
         assert!(state.entries.is_empty());
     }
@@ -79,9 +85,23 @@ mod tests {
     #[test]
     fn parent_scan_finished_does_not_touch_parent_entries() {
         let mut state = state();
-        update(&mut state, Message::ParentScanBatch(vec![entry()]));
-        update(&mut state, Message::ParentScanFinished);
+        update(&mut state, Message::ParentScanBatch(0, vec![entry()]));
+        update(&mut state, Message::ParentScanFinished(0));
         assert_eq!(state.parent_entries.len(), 1);
+    }
+
+    #[test]
+    fn stale_scan_batches_are_ignored() {
+        let mut state = state();
+        state.scan_generation = 2;
+
+        update(&mut state, Message::ScanBatch(1, vec![entry()]));
+        update(&mut state, Message::ParentScanBatch(1, vec![entry()]));
+        update(&mut state, Message::ScanFinished(1));
+        update(&mut state, Message::ParentScanFinished(1));
+
+        assert!(state.entries.is_empty());
+        assert!(state.parent_entries.is_empty());
     }
 
     #[test]
