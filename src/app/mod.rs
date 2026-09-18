@@ -42,7 +42,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    let is_quit_key = matches!(key.code, KeyCode::Char('q'))
+    let is_quit_key = (key.modifiers == KeyModifiers::NONE && matches!(key.code, KeyCode::Char('q')))
         || (key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')));
 
     if is_quit_key {
@@ -92,8 +92,26 @@ mod tests {
     #[test]
     fn unrelated_keys_do_not_quit() {
         let mut state = state();
-        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert!(!state.should_quit);
+
+        for bits in 0..=0b0111_1111 {
+            let modifiers = KeyModifiers::from_bits_truncate(bits);
+
+            for c in ('a'..='z').chain('A'..='Z') {
+                // Exclude exact quit keys safely
+                let is_quit_key = (c == 'q' && modifiers == KeyModifiers::NONE)
+                    || (c == 'c' && modifiers.contains(KeyModifiers::CONTROL));
+
+                if is_quit_key {
+                    continue;
+                }
+
+                handle_key(&mut state, key(KeyCode::Char(c), modifiers));
+                assert!(
+                    !state.should_quit,
+                    "Key combination '{c}' with modifiers {modifiers:?} unexpectedly set should_quit to true"
+                );
+            }
+        }
     }
 
     #[test]
