@@ -18,8 +18,15 @@ pub enum Command {
     SelectPrevious,
     /// Moves the highlighted entry in the "current" pane down one.
     SelectNext,
-    /// Enters the highlighted directory (`l` / Right / Enter).
+    /// Enters the highlighted directory (`l` / Right). Files are ignored so
+    /// Miller-column navigation cannot accidentally launch `$EDITOR`.
     EnterDirectory,
+    /// Enter: descend into a directory, or open a file in `$EDITOR`.
+    Activate,
+    /// Opens the highlighted file in `$EDITOR` (`e`). Directories are ignored.
+    OpenInEditor,
+    /// Opens the "open with" picker (`o` / `E`). Directories are ignored.
+    OpenWith,
     /// Moves up to the parent directory (`h` / Left / Backspace).
     OpenParent,
     /// Scrolls the preview pane up by one page.
@@ -48,9 +55,16 @@ pub fn command_for_key(key: KeyEvent) -> Option<Command> {
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Command::Cancel),
         (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::NONE) => Some(Command::SelectPrevious),
         (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::NONE) => Some(Command::SelectNext),
-        (KeyCode::Right | KeyCode::Enter | KeyCode::Char('l'), KeyModifiers::NONE) => {
-            Some(Command::EnterDirectory)
+        (KeyCode::Right | KeyCode::Char('l'), KeyModifiers::NONE) => Some(Command::EnterDirectory),
+        (KeyCode::Enter, KeyModifiers::NONE) => Some(Command::Activate),
+        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Command::OpenInEditor),
+        (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Command::OpenWith),
+        (KeyCode::Char('E'), modifiers)
+            if modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT =>
+        {
+            Some(Command::OpenWith)
         }
+        (KeyCode::Char('e'), KeyModifiers::SHIFT) => Some(Command::OpenWith),
         (KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h'), KeyModifiers::NONE) => {
             Some(Command::OpenParent)
         }
@@ -170,14 +184,62 @@ mod tests {
     }
 
     #[test]
-    fn l_enter_and_right_enter_directory() {
-        for code in [KeyCode::Char('l'), KeyCode::Enter, KeyCode::Right] {
+    fn l_and_right_enter_directory() {
+        for code in [KeyCode::Char('l'), KeyCode::Right] {
             assert_eq!(
                 command_for_key(key(code, KeyModifiers::NONE)),
                 Some(Command::EnterDirectory),
                 "{code:?}"
             );
         }
+    }
+
+    #[test]
+    fn enter_activates_the_selection() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Command::Activate)
+        );
+    }
+
+    #[test]
+    fn e_opens_in_editor() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(Command::OpenInEditor)
+        );
+    }
+
+    #[test]
+    fn o_and_shift_e_open_with() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(Command::OpenWith)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            Some(Command::OpenWith)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('e'), KeyModifiers::SHIFT)),
+            Some(Command::OpenWith)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('E'), KeyModifiers::NONE)),
+            Some(Command::OpenWith)
+        );
+    }
+
+    #[test]
+    fn modified_e_does_not_open_in_editor() {
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('e'), KeyModifiers::SHIFT)),
+            Some(Command::OpenWith)
+        );
+        assert_eq!(
+            command_for_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            None
+        );
     }
 
     #[test]
@@ -243,6 +305,11 @@ mod tests {
                 let is_bare_j = c == 'j' && modifiers == KeyModifiers::NONE;
                 let is_bare_l = c == 'l' && modifiers == KeyModifiers::NONE;
                 let is_bare_h = c == 'h' && modifiers == KeyModifiers::NONE;
+                let is_bare_e = c == 'e' && modifiers == KeyModifiers::NONE;
+                let is_bare_o = c == 'o' && modifiers == KeyModifiers::NONE;
+                let is_open_with_e = (c == 'E'
+                    && (modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT))
+                    || (c == 'e' && modifiers == KeyModifiers::SHIFT);
                 let is_ctrl_u = c == 'u' && modifiers == KeyModifiers::CONTROL;
                 let is_ctrl_d = c == 'd' && modifiers == KeyModifiers::CONTROL;
 
@@ -256,6 +323,10 @@ mod tests {
                     Some(Command::SelectNext)
                 } else if is_bare_l {
                     Some(Command::EnterDirectory)
+                } else if is_bare_e {
+                    Some(Command::OpenInEditor)
+                } else if is_bare_o || is_open_with_e {
+                    Some(Command::OpenWith)
                 } else if is_bare_h {
                     Some(Command::OpenParent)
                 } else if is_ctrl_u {

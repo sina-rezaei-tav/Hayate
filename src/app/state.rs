@@ -5,6 +5,8 @@ use compact_str::CompactString;
 
 use crate::fs::FileEntry;
 
+use super::open_with::InteractionMode;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     pub should_quit: bool,
@@ -51,6 +53,14 @@ pub struct AppState {
     pub recursive_file_count: Option<u64>,
     /// Whether a recursive count is currently running in the background.
     pub is_counting_recursively: bool,
+    /// Last user-facing notice (missing `$EDITOR`, editor spawn failure).
+    /// Cleared on the next command.
+    pub notice: Option<String>,
+    /// Browser vs a blocking modal (open-with, later rename/help).
+    pub mode: InteractionMode,
+    /// Incremented each time the open-with picker opens so a late PATH
+    /// listing cannot fill a newer (or already closed) prompt.
+    pub open_with_generation: u64,
 }
 
 impl AppState {
@@ -74,6 +84,9 @@ impl AppState {
             frame_height: 24,
             recursive_file_count: None,
             is_counting_recursively: false,
+            notice: None,
+            mode: InteractionMode::Browser,
+            open_with_generation: 0,
         }
     }
 
@@ -144,6 +157,8 @@ mod tests {
         let state = AppState::new(PathBuf::from("/tmp"));
         assert!(!state.should_quit);
         assert_eq!(state.current_dir, PathBuf::from("/tmp"));
+        assert!(state.notice.is_none());
+        assert!(matches!(state.mode, InteractionMode::Browser));
     }
 
     #[test]

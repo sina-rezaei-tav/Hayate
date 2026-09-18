@@ -7,9 +7,12 @@
 
 use std::path::PathBuf;
 
+use compact_str::CompactString;
+
 use crate::fs::FileEntry;
 use crate::preview::{FilePreview, PreviewPayload};
 
+use super::open_with::InteractionMode;
 use super::AppState;
 
 #[derive(Debug)]
@@ -33,6 +36,11 @@ pub enum Message {
     /// A background preview read finished for `path`. Applied only if that
     /// path is still the highlighted file.
     PreviewReady(PathBuf, PreviewPayload),
+    /// PATH executables for the open-with picker. Applied only if the
+    /// picker is still open with this generation.
+    OpenWithListing(u64, Vec<CompactString>),
+    /// PATH listing failed. Same generation rule as [`OpenWithListing`].
+    OpenWithListingFailed(u64, String),
 }
 
 /// Applies one message to `state`. The single "reducer" for every
@@ -90,6 +98,21 @@ pub fn update(state: &mut AppState, message: Message) {
                     PreviewPayload::Binary => FilePreview::Binary { path },
                     PreviewPayload::Error(message) => FilePreview::Error { path, message },
                 };
+            }
+        }
+        Message::OpenWithListing(generation, names) => {
+            if let InteractionMode::OpenWith(prompt) = &mut state.mode
+                && prompt.generation == generation
+            {
+                prompt.set_candidates(names);
+            }
+        }
+        Message::OpenWithListingFailed(generation, err) => {
+            if let InteractionMode::OpenWith(prompt) = &mut state.mode
+                && prompt.generation == generation
+            {
+                prompt.listing_complete = true;
+                prompt.listing_error = Some(err);
             }
         }
     }
@@ -334,5 +357,58 @@ mod tests {
         let mut state = state();
         update(&mut state, Message::ParentScanFailed(0, "permission denied".into()));
         assert_eq!(state.parent_scan_error.as_deref(), Some("permission denied"));
+    }
+
+    #[test]
+    fn open_with_listing_fills_the_open_picker() {
+        let mut state = state();
+        state.mode = InteractionMode::OpenWith(crate::app::open_with::OpenWithPrompt::new(
+            "/tmp/a.txt".into(),
+            1,
+        ));
+
+        update(
+            &mut state,
+            Message::OpenWithListing(1, vec!["vim".into(), "nano".into()]),
+        );
+
+        match &state.mode {
+            InteractionMode::OpenWith(prompt) => {
+                assert!(prompt.listing_complete);
+                assert_eq!(prompt.candidates.len(), 2);
+            }
+            InteractionMode::Browser => panic!("picker closed by a listing"),
+        }
+    }
+
+    #[test]
+    fn a_stale_open_with_listing_is_ignored() {
+        let mut state = state();
+        state.mode = InteractionMode::OpenWith(crate::app::open_with::OpenWithPrompt::new(
+            "/tmp/a.txt".into(),
+            2,
+        ));
+
+        update(&mut state, Message::OpenWithListing(1, vec!["vim".into()]));
+        update(
+            &mut state,
+            Message::OpenWithListingFailed(1, "gone".into()),
+        );
+
+        match &state.mode {
+            InteractionMode::OpenWith(prompt) => {
+                assert!(prompt.candidates.is_empty());
+                assert!(!prompt.listing_complete);
+                assert!(prompt.listing_error.is_none());
+            }
+            InteractionMode::Browser => panic!("picker closed by a stale listing"),
+        }
+    }
+
+    #[test]
+    fn open_with_listing_is_ignored_after_the_picker_closes() {
+        let mut state = state();
+        update(&mut state, Message::OpenWithListing(1, vec!["vim".into()]));
+        assert!(matches!(state.mode, InteractionMode::Browser));
     }
 }

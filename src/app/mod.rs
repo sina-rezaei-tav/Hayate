@@ -8,20 +8,26 @@
 //! for spawning.
 
 pub mod command;
+pub mod editor;
 pub mod jobs;
 pub mod message;
 pub mod navigation;
+pub mod open_with;
 pub mod state;
 
 pub use state::AppState;
+
+use std::path::{Path, PathBuf};
 
 use crossterm::event::Event;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use command::{Command, command_for_key};
+use editor::EditorLaunch;
 use message::{Message, update};
 use navigation::ScanPlan;
+use open_with::{InteractionMode, OpenWithAction, OpenWithPrompt};
 
 use crate::event::{AppEvent, EventHandler};
 use crate::ui;
@@ -35,6 +41,7 @@ struct LoopCtl {
     scan_cancel: CancellationToken,
     active_job_cancel: Option<CancellationToken>,
     preview_cancel: Option<CancellationToken>,
+    open_with_cancel: Option<CancellationToken>,
     messages: UnboundedSender<Message>,
 }
 
@@ -45,6 +52,7 @@ impl LoopCtl {
             app_cancel,
             active_job_cancel: None,
             preview_cancel: None,
+            open_with_cancel: None,
             messages,
         }
     }
@@ -53,6 +61,19 @@ impl LoopCtl {
         if let Some(token) = self.preview_cancel.take() {
             token.cancel();
         }
+    }
+
+    fn cancel_open_with_listing(&mut self) {
+        if let Some(token) = self.open_with_cancel.take() {
+            token.cancel();
+        }
+    }
+
+    fn start_open_with_listing(&mut self, generation: u64) {
+        self.cancel_open_with_listing();
+        let token = self.app_cancel.child_token();
+        jobs::spawn_open_with_listing(generation, token.clone(), self.messages.clone());
+        self.open_with_cancel = Some(token);
     }
 
     /// Cancels in-flight directory scans (and any recursive count of the
@@ -130,9 +151,26 @@ pub async fn run(mut state: AppState, tui: &mut Tui, mut events: EventHandler) -
             event = events.next() => {
                 match event {
                     Ok(AppEvent::Input(Event::Key(key))) => {
-                        if let Some(command) = command_for_key(key) {
-                            run_command(command, &mut state, &mut ctl);
-                            request_preview_if_needed(&mut state, &mut ctl);
+                        match dispatch_key(key, &mut state, &mut ctl) {
+                            LoopEffect::OpenEditor(path) => {
+                                if let Some(spec) = resolve_editor_spec(&mut state, &path)
+                                    && run_external(tui, &mut events, &mut state, spec, false).await
+                                {
+                                    invalidate_cached_preview(&mut state, &mut ctl);
+                                }
+                                request_preview_if_needed(&mut state, &mut ctl);
+                            }
+                            LoopEffect::RunExternal { spec, report_nonzero } => {
+                                if run_external(tui, &mut events, &mut state, spec, report_nonzero)
+                                    .await
+                                {
+                                    invalidate_cached_preview(&mut state, &mut ctl);
+                                }
+                                request_preview_if_needed(&mut state, &mut ctl);
+                            }
+                            LoopEffect::None => {
+                                request_preview_if_needed(&mut state, &mut ctl);
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -165,12 +203,16 @@ fn handle_message(state: &mut AppState, ctl: &mut LoopCtl, message: Message) {
     request_preview_if_needed(state, ctl);
 }
 
-fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
+fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> LoopEffect {
+    state.notice = None;
     match command {
-        Command::Quit => state.should_quit = true,
+        Command::Quit => {
+            state.should_quit = true;
+            LoopEffect::None
+        }
         Command::RecountRecursive => {
             if state.is_counting_recursively {
-                return;
+                return LoopEffect::None;
             }
             let job_token = ctl.app_cancel.child_token();
             state.is_counting_recursively = true;
@@ -182,6 +224,7 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
                 ctl.messages.clone(),
             );
             ctl.active_job_cancel = Some(job_token);
+            LoopEffect::None
         }
         Command::Cancel => {
             if let Some(token) = ctl.active_job_cancel.take() {
@@ -189,10 +232,12 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
                 state.count_generation = state.count_generation.wrapping_add(1);
             }
             state.is_counting_recursively = false;
+            LoopEffect::None
         }
         Command::SelectPrevious => {
             let current = state.selected_index().unwrap_or(0);
             state.selected = current.saturating_sub(1);
+            LoopEffect::None
         }
         Command::SelectNext => {
             if let Some(index) = state.selected_index()
@@ -200,26 +245,189 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) {
             {
                 state.selected = index + 1;
             }
+            LoopEffect::None
         }
         Command::EnterDirectory => {
             if let Some(plan) = navigation::enter_selected(state) {
                 ctl.apply_scan_plan(state, plan);
             }
+            LoopEffect::None
+        }
+        Command::Activate => {
+            if let Some(plan) = navigation::enter_selected(state) {
+                ctl.apply_scan_plan(state, plan);
+                LoopEffect::None
+            } else {
+                open_selected_file(state)
+            }
+        }
+        Command::OpenInEditor => open_selected_file(state),
+        Command::OpenWith => {
+            begin_open_with(state, ctl);
+            LoopEffect::None
         }
         Command::OpenParent => {
             if let Some(plan) = navigation::open_parent(state) {
                 ctl.apply_scan_plan(state, plan);
             }
+            LoopEffect::None
         }
         Command::PreviewPageUp => {
             let (page, limit) = preview_scroll_metrics(state);
             state.scroll_preview(-page, limit);
+            LoopEffect::None
         }
         Command::PreviewPageDown => {
             let (page, limit) = preview_scroll_metrics(state);
             state.scroll_preview(page, limit);
+            LoopEffect::None
         }
     }
+}
+
+/// Side effects that own the TTY. Kept out of `update` so later "shell out"
+/// features (pager, `$SHELL`) use the same hand-off without growing `select!`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoopEffect {
+    None,
+    OpenEditor(PathBuf),
+    RunExternal {
+        spec: EditorLaunch,
+        report_nonzero: bool,
+    },
+}
+
+fn dispatch_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    ctl: &mut LoopCtl,
+) -> LoopEffect {
+    // Ctrl+C is the emergency exit even inside a modal. Bare `q` types into
+    // the picker; it only quits from the browser.
+    if matches!(command_for_key(key), Some(Command::Quit))
+        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+    {
+        return run_command(Command::Quit, state, ctl);
+    }
+    if matches!(state.mode, InteractionMode::OpenWith(_)) {
+        return apply_open_with_key(key, state, ctl);
+    }
+    match command_for_key(key) {
+        Some(command) => run_command(command, state, ctl),
+        None => LoopEffect::None,
+    }
+}
+
+fn apply_open_with_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    ctl: &mut LoopCtl,
+) -> LoopEffect {
+    let InteractionMode::OpenWith(prompt) = &mut state.mode else {
+        return LoopEffect::None;
+    };
+    match open_with::handle_key(prompt, key) {
+        OpenWithAction::None => {
+            state.notice = None;
+            LoopEffect::None
+        }
+        OpenWithAction::Close => {
+            ctl.cancel_open_with_listing();
+            state.mode = InteractionMode::Browser;
+            state.notice = None;
+            LoopEffect::None
+        }
+        OpenWithAction::Notice(message) => {
+            state.notice = Some(message);
+            LoopEffect::None
+        }
+        OpenWithAction::Launch(spec) => {
+            ctl.cancel_open_with_listing();
+            state.mode = InteractionMode::Browser;
+            state.notice = None;
+            LoopEffect::RunExternal {
+                spec,
+                report_nonzero: true,
+            }
+        }
+    }
+}
+
+fn begin_open_with(state: &mut AppState, ctl: &mut LoopCtl) {
+    let Some(entry) = state.selected_entry() else {
+        return;
+    };
+    if entry.is_dir {
+        return;
+    }
+    let path = entry.path.clone();
+    state.open_with_generation = state.open_with_generation.wrapping_add(1);
+    let generation = state.open_with_generation;
+    state.mode = InteractionMode::OpenWith(OpenWithPrompt::new(path, generation));
+    ctl.start_open_with_listing(generation);
+}
+
+fn open_selected_file(state: &AppState) -> LoopEffect {
+    match state.selected_entry() {
+        Some(entry) if !entry.is_dir => LoopEffect::OpenEditor(entry.path.clone()),
+        _ => LoopEffect::None,
+    }
+}
+
+fn resolve_editor_spec(state: &mut AppState, path: &Path) -> Option<EditorLaunch> {
+    match editor::launch_spec_from_env(path) {
+        Ok(spec) => Some(spec),
+        Err(err) => {
+            state.notice = Some(err.to_string());
+            None
+        }
+    }
+}
+
+/// Hands the TTY to an external program and takes it back. Returns whether
+/// the process was actually started (so the caller can reload a possibly
+/// edited preview).
+async fn run_external(
+    tui: &mut Tui,
+    events: &mut EventHandler,
+    state: &mut AppState,
+    spec: EditorLaunch,
+    report_nonzero: bool,
+) -> bool {
+    let program = spec.program.to_string_lossy().into_owned();
+    events.release_tty();
+    if let Err(err) = tui.suspend() {
+        events.recapture_tty();
+        state.notice = Some(err.to_string());
+        return false;
+    }
+
+    let outcome = tokio::task::spawn_blocking(move || editor::run_spec(&spec)).await;
+    let resume_result = tui.resume();
+    events.recapture_tty();
+
+    if let Err(err) = resume_result {
+        state.notice = Some(err.to_string());
+    } else {
+        match outcome {
+            Ok(Ok(status)) if report_nonzero && !status.success() => {
+                state.notice = Some(match status.code() {
+                    Some(code) => format!("{program} exited with status {code}"),
+                    None => format!("{program} was terminated by a signal"),
+                });
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => state.notice = Some(err.to_string()),
+            Err(err) => state.notice = Some(format!("editor task failed: {err}")),
+        }
+    }
+    true
+}
+
+fn invalidate_cached_preview(state: &mut AppState, ctl: &mut LoopCtl) {
+    ctl.cancel_preview();
+    state.preview = crate::preview::FilePreview::Idle;
+    state.preview_scroll = 0;
 }
 
 /// Starts a preview read when the highlighted file is not already cached.
@@ -697,5 +905,228 @@ mod tests {
         request_preview_if_needed(&mut state, &mut ctl);
 
         assert_eq!(state.preview_scroll, 0);
+    }
+
+    #[test]
+    fn open_in_editor_on_a_file_does_not_cancel_scans() {
+        let mut state = state_with_entries(2);
+        let (mut ctl, _rx) = ctl();
+        let scan = ctl.scan_cancel.clone();
+
+        let effect = run_command(Command::OpenInEditor, &mut state, &mut ctl);
+
+        assert!(!scan.is_cancelled());
+        assert_eq!(
+            effect,
+            LoopEffect::OpenEditor(PathBuf::from("/tmp/0.txt"))
+        );
+    }
+
+    #[test]
+    fn open_in_editor_on_a_directory_is_a_noop() {
+        let mut state = state();
+        state.entries = vec![FileEntry::new("/tmp/sub".into(), true, 0)];
+        let (mut ctl, _rx) = ctl();
+
+        let effect = run_command(Command::OpenInEditor, &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::None);
+        assert_eq!(state.current_dir, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn open_in_editor_on_an_empty_listing_is_a_noop() {
+        let mut state = state();
+        let (mut ctl, _rx) = ctl();
+
+        assert_eq!(
+            run_command(Command::OpenInEditor, &mut state, &mut ctl),
+            LoopEffect::None
+        );
+    }
+
+    #[test]
+    fn enter_directory_on_a_file_does_not_open_the_editor() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+
+        let effect = run_command(Command::EnterDirectory, &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::None, "l/Right must not launch $EDITOR");
+    }
+
+    #[test]
+    fn activate_on_a_file_opens_the_editor() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+
+        let effect = run_command(Command::Activate, &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::OpenEditor(PathBuf::from("/tmp/0.txt")));
+        assert_eq!(state.current_dir, PathBuf::from("/tmp"));
+    }
+
+    #[tokio::test]
+    async fn activate_on_a_directory_enters_it() {
+        let mut state = AppState::new("/tmp/project".into());
+        state.entries = vec![FileEntry::new("/tmp/project/src".into(), true, 0)];
+        let (mut ctl, _rx) = ctl();
+
+        let effect = run_command(Command::Activate, &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::None);
+        assert_eq!(state.current_dir, PathBuf::from("/tmp/project/src"));
+    }
+
+    #[test]
+    fn a_command_clears_a_previous_notice() {
+        let mut state = state();
+        state.notice = Some("no editor found (set EDITOR, or install nvim/vim/vi/nano)".into());
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::SelectNext, &mut state, &mut ctl);
+
+        assert!(state.notice.is_none());
+    }
+
+    #[test]
+    fn invalidate_cached_preview_drops_the_in_flight_token() {
+        let mut state = state_with_entries(1);
+        state.preview = crate::preview::FilePreview::Text {
+            path: "/tmp/0.txt".into(),
+            content: "old".into(),
+            truncated: false,
+        };
+        state.preview_scroll = 4;
+        let (mut ctl, _rx) = ctl();
+        let previous = ctl.app_cancel.child_token();
+        ctl.preview_cancel = Some(previous.clone());
+
+        invalidate_cached_preview(&mut state, &mut ctl);
+
+        assert!(previous.is_cancelled());
+        assert!(ctl.preview_cancel.is_none());
+        assert!(matches!(state.preview, crate::preview::FilePreview::Idle));
+        assert_eq!(state.preview_scroll, 0);
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[tokio::test]
+    async fn open_with_on_a_file_opens_the_picker_without_cancelling_scans() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+        let scan = ctl.scan_cancel.clone();
+
+        let effect = run_command(Command::OpenWith, &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::None);
+        assert!(!scan.is_cancelled());
+        assert!(matches!(state.mode, InteractionMode::OpenWith(_)));
+        assert_eq!(state.open_with_generation, 1);
+    }
+
+    #[test]
+    fn open_with_on_a_directory_is_a_noop() {
+        let mut state = state();
+        state.entries = vec![FileEntry::new("/tmp/sub".into(), true, 0)];
+        let (mut ctl, _rx) = ctl();
+
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+
+        assert!(matches!(state.mode, InteractionMode::Browser));
+    }
+
+    #[tokio::test]
+    async fn j_in_the_open_with_picker_does_not_move_the_file_list() {
+        let mut state = state_with_entries(3);
+        state.selected = 0;
+        let (mut ctl, _rx) = ctl();
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+        if let InteractionMode::OpenWith(prompt) = &mut state.mode {
+            prompt.set_candidates(vec!["nvim".into(), "vim".into()]);
+        }
+
+        let effect = dispatch_key(key(crossterm::event::KeyCode::Char('j')), &mut state, &mut ctl);
+
+        assert_eq!(effect, LoopEffect::None);
+        assert_eq!(state.selected, 0, "j must not move the file list while the picker is open");
+        match &state.mode {
+            InteractionMode::OpenWith(prompt) => assert_eq!(prompt.selected, 1),
+            InteractionMode::Browser => panic!("picker closed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn q_in_the_open_with_picker_does_not_quit() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+
+        dispatch_key(key(crossterm::event::KeyCode::Char('q')), &mut state, &mut ctl);
+
+        assert!(!state.should_quit);
+        match &state.mode {
+            InteractionMode::OpenWith(prompt) => assert_eq!(prompt.query, "q"),
+            InteractionMode::Browser => panic!("picker closed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_quits_even_while_the_picker_is_open() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        dispatch_key(key, &mut state, &mut ctl);
+
+        assert!(state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn esc_closes_the_open_with_picker() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+        assert!(ctl.open_with_cancel.is_some());
+
+        dispatch_key(key(crossterm::event::KeyCode::Esc), &mut state, &mut ctl);
+
+        assert!(matches!(state.mode, InteractionMode::Browser));
+        assert!(ctl.open_with_cancel.is_none());
+    }
+
+    #[tokio::test]
+    async fn enter_in_the_picker_launches_the_typed_command() {
+        let mut state = state_with_entries(1);
+        let (mut ctl, _rx) = ctl();
+        run_command(Command::OpenWith, &mut state, &mut ctl);
+        if let InteractionMode::OpenWith(prompt) = &mut state.mode {
+            prompt.query = "hexdump -C".into();
+        }
+
+        let effect = dispatch_key(key(crossterm::event::KeyCode::Enter), &mut state, &mut ctl);
+
+        match effect {
+            LoopEffect::RunExternal { spec, report_nonzero } => {
+                assert!(report_nonzero);
+                assert_eq!(spec.program, std::ffi::OsString::from("hexdump"));
+                assert_eq!(
+                    spec.args,
+                    vec![
+                        std::ffi::OsString::from("-C"),
+                        std::ffi::OsString::from("/tmp/0.txt"),
+                    ]
+                );
+            }
+            other => panic!("expected RunExternal, got {other:?}"),
+        }
+        assert!(matches!(state.mode, InteractionMode::Browser));
     }
 }
