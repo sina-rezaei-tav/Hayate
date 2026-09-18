@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::app::AppState;
 use crate::fs::FileEntry;
@@ -19,24 +19,38 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    let current_name = state.current_dir.file_name().map(|name| name.to_string_lossy());
+    let (items, selected) = if let Some(err) = &state.parent_scan_error {
+        (
+            vec![ListItem::new(Line::from(format!("scan failed: {err}")))],
+            None,
+        )
+    } else {
+        let current_name = state.current_dir.file_name().map(|name| name.to_string_lossy());
+        let mut selected = None;
+        let items: Vec<ListItem> = state
+            .parent_entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let label = entry_label(entry);
+                let is_current_dir = current_name.as_deref() == Some(entry.name.as_str());
+                if is_current_dir {
+                    selected = Some(index);
+                }
+                let style = if is_current_dir {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(label)).style(style)
+            })
+            .collect();
+        (items, selected)
+    };
 
-    let items: Vec<ListItem> = state
-        .parent_entries
-        .iter()
-        .map(|entry| {
-            let label = entry_label(entry);
-            let is_current_dir = current_name.as_deref() == Some(entry.name.as_str());
-            let style = if is_current_dir {
-                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(label)).style(style)
-        })
-        .collect();
-
-    frame.render_widget(List::new(items).block(block), area);
+    let mut list_state = ListState::default();
+    list_state.select(selected);
+    frame.render_stateful_widget(List::new(items).block(block), area, &mut list_state);
 }
 
 fn entry_label(entry: &FileEntry) -> String {
@@ -100,6 +114,42 @@ mod tests {
 
         let sibling_row = rows.iter().find(|(text, _)| text.contains("other"));
         assert!(matches!(sibling_row, Some((_, false))), "sibling should not be reversed: {rows:?}");
+    }
+
+    #[test]
+    fn current_dir_stays_visible_when_it_is_past_the_pane_height() {
+        let mut state = AppState::new("/tmp/dir-19".into());
+        state.parent_entries = (0..20)
+            .map(|i| FileEntry::new(format!("/tmp/dir-{i:02}").into(), true, 0))
+            .collect();
+
+        let rows = rendered_rows(&state, Rect::new(0, 0, 30, 6));
+        let visible: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|(text, reversed)| text.contains("dir-19") && *reversed),
+            "current dir is off-screen; visible rows were {visible:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_parent_scan_is_not_rendered_as_an_empty_folder() {
+        let mut state = AppState::new("/tmp/project".into());
+        state.parent_scan_error = Some("No such file or directory".into());
+        let rows = rendered_rows(&state, Rect::new(0, 0, 50, 8));
+        let blob = rows
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            blob.contains("failed")
+                || blob.contains("not found")
+                || blob.contains("unreadable")
+                || blob.contains("error"),
+            "unreadable parent looks like an empty folder: {rows:?}"
+        );
     }
 
     #[test]

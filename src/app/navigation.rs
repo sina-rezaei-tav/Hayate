@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::state::index_of_name;
 use super::AppState;
 
 /// Scans to start after a successful directory change. Either field being
@@ -29,10 +30,17 @@ pub fn enter_selected(state: &mut AppState) -> Option<ScanPlan> {
         return None;
     }
 
+    let parent_complete = state.current_listing_complete;
+    let parent_error = state.current_scan_error.clone();
     begin_generation(state);
     state.parent_entries = std::mem::take(&mut state.entries);
+    state.parent_listing_complete = parent_complete;
+    state.parent_scan_error = parent_error;
     state.current_dir = new_dir.clone();
-    state.selected = state.history.get(&new_dir).copied().unwrap_or(0);
+    state.entries.clear();
+    state.current_listing_complete = false;
+    state.current_scan_error = None;
+    state.selected = 0;
 
     Some(ScanPlan {
         current: Some(new_dir),
@@ -47,15 +55,24 @@ pub fn enter_selected(state: &mut AppState) -> Option<ScanPlan> {
 pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
     let parent = usable_parent(&state.current_dir)?;
     let left = state.current_dir.clone();
+    let reused_complete = state.parent_listing_complete;
+    let reused_error = state.parent_scan_error.take();
 
     begin_generation(state);
     let reused = std::mem::take(&mut state.parent_entries);
     state.current_dir = parent.clone();
     state.entries = reused;
+    state.current_listing_complete = reused_complete;
+    state.current_scan_error = reused_error;
+    state.parent_listing_complete = false;
+    state.parent_scan_error = None;
     state.selected = select_left_child_or_history(state, &left);
 
+    let rescan_current = state.entries.is_empty()
+        || !state.current_listing_complete
+        || state.current_scan_error.is_some();
     Some(ScanPlan {
-        current: if state.entries.is_empty() {
+        current: if rescan_current {
             Some(parent.clone())
         } else {
             None
@@ -65,8 +82,11 @@ pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
 }
 
 fn begin_generation(state: &mut AppState) {
-    state.history.insert(state.current_dir.clone(), state.selected);
+    if let Some(entry) = state.selected_entry() {
+        state.history.insert(state.current_dir.clone(), entry.name.clone());
+    }
     state.scan_generation = state.scan_generation.wrapping_add(1);
+    state.count_generation = state.count_generation.wrapping_add(1);
     state.preview = crate::preview::FilePreview::Idle;
     state.preview_scroll = 0;
     state.recursive_file_count = None;
@@ -97,7 +117,10 @@ fn select_left_child_or_history(state: &AppState, left: &Path) -> usize {
             return index;
         }
     }
-    state.history.get(&state.current_dir).copied().unwrap_or(0)
+    state.history
+        .get(&state.current_dir)
+        .and_then(|name| index_of_name(&state.entries, name.as_str()))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -118,6 +141,8 @@ mod tests {
         let mut state = AppState::new("/tmp/project".into());
         state.entries = vec![dir("/tmp/project/src"), file("/tmp/project/README.md")];
         state.parent_entries = vec![dir("/tmp/project"), dir("/tmp/other")];
+        state.current_listing_complete = true;
+        state.parent_listing_complete = true;
         state.selected = 0;
         state
     }
@@ -151,7 +176,7 @@ mod tests {
         assert!(state.entries.is_empty());
         assert_eq!(state.parent_entries.len(), 2);
         assert_eq!(state.parent_entries[0].name, "src");
-        assert_eq!(state.history.get(&PathBuf::from("/tmp/project")), Some(&0));
+        assert_eq!(state.history.get(&PathBuf::from("/tmp/project")).map(|n| n.as_str()), Some("src"));
         assert_eq!(
             plan,
             ScanPlan {
@@ -164,13 +189,20 @@ mod tests {
     }
 
     #[test]
-    fn entering_restores_saved_selection() {
+    fn entering_restores_saved_selection_once_the_listing_arrives() {
         let mut state = state_in_project();
-        state.history.insert("/tmp/project/src".into(), 7);
+        state.history.insert("/tmp/project/src".into(), "lib.rs".into());
 
         enter_selected(&mut state).unwrap();
+        assert_eq!(state.selected, 0);
 
-        assert_eq!(state.selected, 7);
+        state.entries = vec![
+            file("/tmp/project/src/main.rs"),
+            file("/tmp/project/src/lib.rs"),
+        ];
+        state.sync_selection_after_listing_change(None);
+
+        assert_eq!(state.selected, 1);
     }
 
     #[test]
@@ -185,13 +217,30 @@ mod tests {
         assert_eq!(state.entries[0].name, "project");
         assert_eq!(state.selected, 0, "the directory we left should be highlighted");
         assert!(state.parent_entries.is_empty());
-        assert_eq!(state.history.get(&PathBuf::from("/tmp/project")), Some(&1));
+        assert_eq!(state.history.get(&PathBuf::from("/tmp/project")).map(|n| n.as_str()), Some("README.md"));
         assert_eq!(
             plan,
             ScanPlan {
                 current: None,
                 parent: Some("/".into()),
             }
+        );
+    }
+
+    #[test]
+    fn returning_to_a_directory_rescans_when_only_a_partial_listing_was_reused() {
+        let mut state = state_in_project();
+        // First scan batch only; the rest of /tmp/project never arrived.
+        state.entries = vec![dir("/tmp/project/src")];
+        state.current_listing_complete = false;
+
+        enter_selected(&mut state).unwrap();
+        let plan = open_parent(&mut state).unwrap();
+
+        assert_eq!(
+            plan.current,
+            Some(PathBuf::from("/tmp/project")),
+            "reusing a listing that never finished streaming drops the rest of the directory"
         );
     }
 
@@ -254,6 +303,8 @@ mod tests {
 
         open_parent(&mut state).unwrap();
         enter_selected(&mut state).unwrap();
+        state.entries = vec![file("/tmp/project/src/main.rs"), file("/tmp/project/src/lib.rs")];
+        state.sync_selection_after_listing_change(None);
 
         assert_eq!(state.current_dir, PathBuf::from("/tmp/project/src"));
         assert_eq!(state.selected, 1);
@@ -271,5 +322,21 @@ mod tests {
         enter_selected(&mut state).unwrap();
 
         assert!(matches!(state.preview, crate::preview::FilePreview::Idle));
+    }
+
+    #[test]
+    fn returning_to_a_directory_rescans_when_the_reused_listing_failed() {
+        let mut state = state_in_project();
+        state.parent_entries = vec![dir("/tmp/project")];
+        state.parent_listing_complete = true;
+        state.parent_scan_error = Some("permission denied".into());
+
+        let plan = open_parent(&mut state).unwrap();
+
+        assert_eq!(
+            plan.current,
+            Some(PathBuf::from("/tmp")),
+            "reusing a failed parent listing leaves the current pane stuck on the error"
+        );
     }
 }

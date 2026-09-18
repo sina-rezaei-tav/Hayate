@@ -32,6 +32,17 @@ impl FileEntry {
     }
 }
 
+/// Directories first, then by name. Re-applied after every scan batch so a
+/// listing is ordered even while it is still streaming in.
+pub fn sort_listing(entries: &mut [FileEntry]) {
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.as_str().cmp(right.name.as_str()))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +66,19 @@ mod tests {
     fn non_dotfile_is_not_hidden() {
         let entry = FileEntry::new(PathBuf::from("/home/user/config"), true, 0);
         assert!(!entry.is_hidden);
+    }
+
+    #[test]
+    fn sort_listing_puts_directories_first_then_names() {
+        let mut entries = vec![
+            FileEntry::new("/tmp/z.txt".into(), false, 0),
+            FileEntry::new("/tmp/m".into(), true, 0),
+            FileEntry::new("/tmp/a.txt".into(), false, 0),
+            FileEntry::new("/tmp/b".into(), true, 0),
+        ];
+        sort_listing(&mut entries);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["b", "m", "a.txt", "z.txt"]);
     }
 
     #[test]

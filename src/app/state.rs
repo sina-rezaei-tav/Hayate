@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use compact_str::CompactString;
+
 use crate::fs::FileEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,17 +14,28 @@ pub struct AppState {
     /// pane. Empty (rather than `Option`) when `current_dir` has no parent
     /// (filesystem root) or the scan simply hasn't delivered anything yet.
     pub parent_entries: Vec<FileEntry>,
+    /// Whether the current listing has received `ScanFinished` for this
+    /// generation. Incomplete listings must not be reused as if they were
+    /// the whole directory.
+    pub current_listing_complete: bool,
+    pub parent_listing_complete: bool,
+    /// `read_dir` failure for the current/parent scan, if any.
+    pub current_scan_error: Option<String>,
+    pub parent_scan_error: Option<String>,
     /// Intended highlight index into `entries`. May temporarily sit past
     /// `entries.len()` while a scan is still streaming in; use
     /// [`selected_index`](Self::selected_index) / [`selected_entry`](Self::selected_entry)
     /// to read a clamped value.
     pub selected: usize,
-    /// Last highlighted index per visited directory, restored on revisit.
-    pub history: HashMap<PathBuf, usize>,
+    /// Last highlighted entry name per visited directory, restored on revisit.
+    pub history: HashMap<PathBuf, CompactString>,
     /// Incremented on every directory change. Scan messages carry the
     /// generation they were started with so a cancelled walk cannot apply
     /// late batches to the new listing.
     pub scan_generation: u64,
+    /// Incremented when a recursive count starts (and when leaving a
+    /// directory) so a cancelled count cannot clear a newer one.
+    pub count_generation: u64,
     /// Cached contents of the highlighted file. The UI never reads disk
     /// for this; a background job fills it in.
     pub preview: crate::preview::FilePreview,
@@ -47,9 +60,14 @@ impl AppState {
             current_dir,
             entries: Vec::new(),
             parent_entries: Vec::new(),
+            current_listing_complete: false,
+            parent_listing_complete: false,
+            current_scan_error: None,
+            parent_scan_error: None,
             selected: 0,
             history: HashMap::new(),
             scan_generation: 0,
+            count_generation: 0,
             preview: crate::preview::FilePreview::Idle,
             preview_scroll: 0,
             frame_width: 80,
@@ -79,6 +97,34 @@ impl AppState {
         let next = i32::from(self.preview_scroll).saturating_add(delta);
         self.preview_scroll = next.clamp(0, i32::from(limit)) as u16;
     }
+
+    /// After entries are replaced, extended, or sorted: keep the highlight
+    /// on `follow` if that name is still present, otherwise restore history,
+    /// otherwise clamp.
+    ///
+    /// `follow` must be captured *before* mutating `entries`; looking up
+    /// `selected_entry()` after a sort would already point at a different file.
+    pub fn sync_selection_after_listing_change(&mut self, follow: Option<&str>) {
+        if let Some(name) = follow
+            && let Some(index) = index_of_name(&self.entries, name)
+        {
+            self.selected = index;
+            return;
+        }
+        if let Some(name) = self.history.get(&self.current_dir).cloned()
+            && let Some(index) = index_of_name(&self.entries, name.as_str())
+        {
+            self.selected = index;
+            return;
+        }
+        if !self.entries.is_empty() {
+            self.selected = self.selected.min(self.entries.len() - 1);
+        }
+    }
+}
+
+pub fn index_of_name(entries: &[FileEntry], name: &str) -> Option<usize> {
+    entries.iter().position(|entry| entry.name.as_str() == name)
 }
 
 impl Default for AppState {
@@ -143,5 +189,34 @@ mod tests {
         assert_eq!(state.preview_scroll, 3);
         state.scroll_preview(-10, 3);
         assert_eq!(state.preview_scroll, 0);
+    }
+
+    #[test]
+    fn sync_selection_follows_the_named_entry_after_a_sort() {
+        let mut state = AppState::new("/tmp".into());
+        state.entries = vec![
+            FileEntry::new("/tmp/z.txt".into(), false, 0),
+            FileEntry::new("/tmp/a.txt".into(), false, 0),
+        ];
+        state.selected = 0;
+        let follow = state.selected_entry().map(|e| e.name.clone());
+        crate::fs::sort_listing(&mut state.entries);
+        state.sync_selection_after_listing_change(follow.as_deref());
+
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("z.txt"));
+    }
+
+    #[test]
+    fn sync_selection_falls_back_to_history_when_the_followed_name_is_gone() {
+        let mut state = AppState::new("/tmp".into());
+        state.history.insert("/tmp".into(), "b.txt".into());
+        state.entries = vec![
+            FileEntry::new("/tmp/b.txt".into(), false, 0),
+            FileEntry::new("/tmp/z.txt".into(), false, 0),
+        ];
+
+        state.sync_selection_after_listing_change(Some("a.txt"));
+
+        assert_eq!(state.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
     }
 }

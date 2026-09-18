@@ -8,6 +8,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::entry::FileEntry;
 
+/// One update from a directory scan. The channel closes after the last
+/// update (success or failure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanUpdate {
+    Batch(Vec<FileEntry>),
+    Failed(String),
+}
+
 /// Entries are streamed to the consumer in batches this large, so a huge
 /// directory doesn't block the UI waiting for the whole listing at once.
 const BATCH_SIZE: usize = 100;
@@ -27,7 +35,7 @@ const CHANNEL_CAPACITY: usize = 8;
 pub fn scan_directory(
     path: PathBuf,
     cancel_token: CancellationToken,
-) -> mpsc::Receiver<Vec<FileEntry>> {
+) -> mpsc::Receiver<ScanUpdate> {
     let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(run_scan(path, cancel_token, sender, BATCH_SIZE));
     receiver
@@ -36,14 +44,19 @@ pub fn scan_directory(
 async fn run_scan(
     path: PathBuf,
     cancel_token: CancellationToken,
-    sender: mpsc::Sender<Vec<FileEntry>>,
+    sender: mpsc::Sender<ScanUpdate>,
     batch_size: usize,
 ) {
+    if cancel_token.is_cancelled() {
+        return;
+    }
+
     let mut read_dir = match tokio::fs::read_dir(&path).await {
         Ok(read_dir) => read_dir,
-        // Permission denied, not found, etc: nothing to stream, but this
-        // must not take down the task (or the process).
-        Err(_) => return,
+        Err(err) => {
+            send_update(&sender, &cancel_token, ScanUpdate::Failed(err.to_string())).await;
+            return;
+        }
     };
 
     let mut batch = Vec::with_capacity(batch_size);
@@ -61,7 +74,12 @@ async fn run_scan(
                     batch.push(file_entry);
                 }
                 if batch.len() >= batch_size
-                    && !send_batch(&sender, &cancel_token, &mut batch, batch_size).await
+                    && !send_update(
+                        &sender,
+                        &cancel_token,
+                        ScanUpdate::Batch(std::mem::replace(&mut batch, Vec::with_capacity(batch_size))),
+                    )
+                    .await
                 {
                     return;
                 }
@@ -74,26 +92,23 @@ async fn run_scan(
     }
 
     if !batch.is_empty() {
-        send_batch(&sender, &cancel_token, &mut batch, batch_size).await;
+        send_update(&sender, &cancel_token, ScanUpdate::Batch(batch)).await;
     }
 }
 
-/// Sends `batch` (replacing it with a fresh, empty one), racing the send
-/// against cancellation so that a full channel doesn't leave a stale scan
-/// blocked after the user has already navigated away.
+/// Sends one update, racing against cancellation so a full channel doesn't
+/// leave a stale scan blocked after the user has already navigated away.
 ///
 /// Returns whether the scan should continue.
-async fn send_batch(
-    sender: &mpsc::Sender<Vec<FileEntry>>,
+async fn send_update(
+    sender: &mpsc::Sender<ScanUpdate>,
     cancel_token: &CancellationToken,
-    batch: &mut Vec<FileEntry>,
-    batch_size: usize,
+    update: ScanUpdate,
 ) -> bool {
-    let flushed = std::mem::replace(batch, Vec::with_capacity(batch_size));
     tokio::select! {
         biased;
         _ = cancel_token.cancelled() => false,
-        result = sender.send(flushed) => result.is_ok(),
+        result = sender.send(update) => result.is_ok(),
     }
 }
 
@@ -131,9 +146,14 @@ mod tests {
         let mut receiver = scan_directory(dir.path().to_path_buf(), CancellationToken::new());
 
         let mut names = HashSet::new();
-        while let Some(batch) = receiver.recv().await {
-            for entry in batch {
-                names.insert(entry.name.to_string());
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => {
+                    for entry in batch {
+                        names.insert(entry.name.to_string());
+                    }
+                }
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
             }
         }
 
@@ -144,18 +164,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonexistent_directory_yields_no_batches_and_does_not_panic() {
+    async fn listing_includes_hidden_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "visible.txt");
+        write_file(dir.path(), ".viminfo");
+        write_file(dir.path(), ".gitignore");
+
+        let mut receiver = scan_directory(dir.path().to_path_buf(), CancellationToken::new());
+        let mut names = HashSet::new();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => {
+                    for entry in batch {
+                        names.insert(entry.name.to_string());
+                    }
+                }
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
+        }
+
+        assert!(names.contains(".viminfo"), "listing skipped a hidden file: {names:?}");
+        assert!(names.contains(".gitignore"), "listing skipped a hidden file: {names:?}");
+        assert!(names.contains("visible.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_file_is_listed_as_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "real.txt");
+        std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("alias.txt")).unwrap();
+
+        let mut receiver = scan_directory(dir.path().to_path_buf(), CancellationToken::new());
+        let mut listed = Vec::new();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => listed.extend(batch),
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
+        }
+
+        let alias = listed.iter().find(|entry| entry.name == "alias.txt");
+        assert!(
+            matches!(alias, Some(entry) if !entry.is_dir),
+            "symlink-to-file must list as a file so preview and count agree: {listed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonexistent_directory_reports_failure_and_does_not_panic() {
         let mut receiver = scan_directory(
             PathBuf::from("/definitely/does/not/exist"),
             CancellationToken::new(),
         );
 
+        match receiver.recv().await {
+            Some(ScanUpdate::Failed(message)) => assert!(!message.is_empty()),
+            other => panic!("expected a failure, got {other:?}"),
+        }
         assert!(receiver.recv().await.is_none());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn unreadable_directory_yields_no_batches_and_does_not_panic() {
+    async fn unreadable_directory_reports_failure_and_does_not_panic() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -168,7 +240,10 @@ mod tests {
         // Restore permissions so the tempdir can clean itself up on drop.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(matches!(result, Ok(None)), "expected no batches, got {result:?}");
+        match result {
+            Ok(Some(ScanUpdate::Failed(message))) => assert!(!message.is_empty()),
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -187,9 +262,14 @@ mod tests {
         ));
 
         let mut total = 0;
-        while let Some(batch) = receiver.recv().await {
-            assert!(batch.len() <= 3, "batch exceeded configured size: {batch:?}");
-            total += batch.len();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => {
+                    assert!(batch.len() <= 3, "batch exceeded configured size: {batch:?}");
+                    total += batch.len();
+                }
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
         }
         assert_eq!(total, 7);
     }

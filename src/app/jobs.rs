@@ -27,6 +27,7 @@ pub fn spawn_scan(
         cancel_token,
         messages,
         move |batch| Message::ScanBatch(generation, batch),
+        move |err| Message::ScanFailed(generation, err),
         Message::ScanFinished(generation),
     );
 }
@@ -45,6 +46,7 @@ pub fn spawn_parent_scan(
         cancel_token,
         messages,
         move |batch| Message::ParentScanBatch(generation, batch),
+        move |err| Message::ParentScanFailed(generation, err),
         Message::ParentScanFinished(generation),
     );
 }
@@ -56,12 +58,17 @@ fn spawn_scan_forwarding(
     cancel_token: CancellationToken,
     messages: UnboundedSender<Message>,
     make_batch: impl Fn(Vec<crate::fs::FileEntry>) -> Message + Send + 'static,
+    make_failed: impl Fn(String) -> Message + Send + 'static,
     finished: Message,
 ) {
     let mut results = fs::scan_directory(path, cancel_token);
     tokio::spawn(async move {
-        while let Some(batch) = results.recv().await {
-            if messages.send(make_batch(batch)).is_err() {
+        while let Some(update) = results.recv().await {
+            let message = match update {
+                fs::ScanUpdate::Batch(batch) => make_batch(batch),
+                fs::ScanUpdate::Failed(err) => make_failed(err),
+            };
+            if messages.send(message).is_err() {
                 return; // App is shutting down; nothing left to report to.
             }
         }
@@ -80,12 +87,13 @@ fn spawn_scan_forwarding(
 pub fn spawn_recursive_count(
     path: PathBuf,
     cancel_token: CancellationToken,
+    generation: u64,
     messages: UnboundedSender<Message>,
 ) {
     let receiver = fs::count_files_recursive(path, cancel_token.clone());
     tokio::spawn(async move {
         let count = receiver.await.ok().filter(|_| !cancel_token.is_cancelled());
-        let _ = messages.send(Message::RecursiveCountFinished(count));
+        let _ = messages.send(Message::RecursiveCountFinished(generation, count));
     });
 }
 
@@ -161,10 +169,10 @@ mod tests {
         std::fs::write(dir.path().join("sub/b.txt"), b"x").unwrap();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_recursive_count(dir.path().to_path_buf(), CancellationToken::new(), tx);
+        spawn_recursive_count(dir.path().to_path_buf(), CancellationToken::new(), 0, tx);
 
         match rx.recv().await.expect("channel closed without a result") {
-            Message::RecursiveCountFinished(Some(count)) => assert_eq!(count, 2),
+            Message::RecursiveCountFinished(0, Some(count)) => assert_eq!(count, 2),
             other => panic!("unexpected message: {other:?}"),
         }
     }
@@ -178,10 +186,10 @@ mod tests {
         cancel_token.cancel(); // Already cancelled before the walk even starts.
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_recursive_count(dir.path().to_path_buf(), cancel_token, tx);
+        spawn_recursive_count(dir.path().to_path_buf(), cancel_token, 0, tx);
 
         match rx.recv().await.expect("channel closed without a result") {
-            Message::RecursiveCountFinished(None) => {}
+            Message::RecursiveCountFinished(0, None) => {}
             other => panic!("expected a cancelled (None) result, got {other:?}"),
         }
     }
