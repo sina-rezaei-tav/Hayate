@@ -43,4 +43,14 @@ mod tests {
         assert!(content.contains("Press 'q' to quit"));
         assert!(content.contains("/tmp"));
     }
+
+    #[test]
+    fn does_not_panic_on_degenerate_terminal_sizes() {
+        let state = AppState::default();
+
+        for (width, height) in [(0, 0), (1, 1), (2, 2)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(frame, &state)).unwrap();
+        }
+    }
 }
