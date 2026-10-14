@@ -54,11 +54,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn entry_label(entry: &FileEntry) -> String {
-    if entry.is_dir {
-        format!("{}/", entry.name)
-    } else {
-        entry.name.to_string()
-    }
+    format!("{}{}", entry.name, entry.kind_suffix())
 }
 
 #[cfg(test)]

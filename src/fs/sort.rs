@@ -12,6 +12,9 @@ pub enum SortKey {
     Size,
     Mtime,
     Extension,
+    /// Directory, symlink-to-directory, other symlink, then file.
+    /// Not a mime type: Hayate does not read file contents to classify them.
+    Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,15 @@ pub fn sort_entries(entries: &mut [FileEntry], spec: &SortSpec) {
     entries.sort_by(|left, right| cmp_entries(left, right, spec));
 }
 
+fn kind_rank(entry: &FileEntry) -> u8 {
+    match (entry.is_dir, entry.is_symlink) {
+        (true, false) => 0,
+        (true, true) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    }
+}
+
 fn cmp_entries(left: &FileEntry, right: &FileEntry, spec: &SortSpec) -> Ordering {
     let group = if spec.dirs_first {
         right.is_dir.cmp(&left.is_dir)
@@ -50,6 +62,9 @@ fn cmp_entries(left: &FileEntry, right: &FileEntry, spec: &SortSpec) -> Ordering
             .then_with(|| natural_cmp(left.name.as_str(), right.name.as_str())),
         SortKey::Extension => extension(left.name.as_str())
             .cmp(extension(right.name.as_str()))
+            .then_with(|| natural_cmp(left.name.as_str(), right.name.as_str())),
+        SortKey::Type => kind_rank(left)
+            .cmp(&kind_rank(right))
             .then_with(|| natural_cmp(left.name.as_str(), right.name.as_str())),
     };
     if spec.reverse {
@@ -259,5 +274,44 @@ mod tests {
         };
         sort_entries(&mut entries, &spec);
         assert_eq!(names(&entries), [".gitignore", "c.gz", "a.rs", "b.txt"]);
+    }
+
+    #[test]
+    fn type_sort_puts_links_ahead_of_files_with_the_same_extension() {
+        let mut link = entry("z.txt", false, 0, 0);
+        link.is_symlink = true;
+        let mut entries = vec![entry("a.txt", false, 0, 0), link, entry("m", true, 0, 0)];
+
+        let by_type = SortSpec {
+            key: SortKey::Type,
+            reverse: false,
+            dirs_first: false,
+        };
+        sort_entries(&mut entries, &by_type);
+        assert_eq!(names(&entries), ["m", "z.txt", "a.txt"]);
+
+        let by_extension = SortSpec {
+            key: SortKey::Extension,
+            reverse: false,
+            dirs_first: false,
+        };
+        sort_entries(&mut entries, &by_extension);
+        assert_eq!(names(&entries), ["m", "a.txt", "z.txt"]);
+    }
+
+    #[test]
+    fn type_sort_keeps_a_real_directory_ahead_of_a_linked_directory() {
+        let mut linked = entry("linkdir", true, 0, 0);
+        linked.is_symlink = true;
+        let mut entries = vec![linked, entry("real", true, 0, 0), entry("file", false, 0, 0)];
+        sort_entries(
+            &mut entries,
+            &SortSpec {
+                key: SortKey::Type,
+                reverse: false,
+                dirs_first: true,
+            },
+        );
+        assert_eq!(names(&entries), ["real", "linkdir", "file"]);
     }
 }

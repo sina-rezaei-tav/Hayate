@@ -180,6 +180,7 @@ pub fn apply(command: Command, count: Option<u32>, state: &mut AppState, metrics
             spec: editor::shell_launch(std::env::var("SHELL").ok().as_deref(), None, &state.current_dir),
             report_nonzero: false,
         },
+        Command::Reload => scan_of(Some(navigation::rescan_current(state))),
         Command::DisplayFile => {
             if state.selected_entry().is_none() {
                 state.notice = Some("nothing to display".to_string());
@@ -680,6 +681,7 @@ fn run_console(state: &mut AppState, command: ConsoleCommand) -> Step {
         }
         ConsoleCommand::TabNew => tab_new(state),
         ConsoleCommand::TabClose => tab_close(state),
+        ConsoleCommand::Reload => scan_of(Some(navigation::rescan_current(state))),
         ConsoleCommand::Help => {
             state.mode = InteractionMode::Help(prompt::HelpView { scroll: 0, count: None });
             Step::None

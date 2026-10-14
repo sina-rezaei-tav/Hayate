@@ -3,6 +3,7 @@ pub mod entry;
 pub mod ops;
 pub mod scanner;
 pub mod sort;
+pub mod watch;
 
 pub use count::count_files_recursive;
 pub use entry::{sort_listing, FileEntry};

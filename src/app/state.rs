@@ -79,10 +79,15 @@ pub struct AppState {
     pub tabs: Vec<Tab>,
     pub tab_index: usize,
     pub bookmarks: HashMap<char, PathBuf>,
-    /// Bumped when a disk operation starts and whenever the directory
-    /// changes, so a finished copy cannot refresh a directory the user left.
+    /// Bumped when a disk operation starts and when navigation leaves this
+    /// directory. A reload of the same directory does not bump it, so the
+    /// operation can still report its notice.
     pub file_op_generation: u64,
     pub pending_rescan: bool,
+    /// A watch event arrived while the current scan was still streaming.
+    /// Applied once that scan finishes, so the reload cannot drop the batch
+    /// that is already in flight.
+    pub watch_dirty: bool,
     /// A hidden row the cursor is allowed to show, so leaving `~/.config`
     /// does not pretend that directory was never selected.
     pub pinned: Option<PathBuf>,
@@ -138,6 +143,7 @@ impl AppState {
             bookmarks: HashMap::new(),
             file_op_generation: 0,
             pending_rescan: false,
+            watch_dirty: false,
             pinned: None,
         }
     }

@@ -22,6 +22,7 @@ pub enum ConsoleCommand {
     TabNew,
     TabClose,
     Help,
+    Reload,
 }
 
 pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
@@ -51,6 +52,7 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
         "tab_new" => none(rest, "tab_new").map(|()| ConsoleCommand::TabNew),
         "tab_close" => none(rest, "tab_close").map(|()| ConsoleCommand::TabClose),
         "help" => none(rest, "help").map(|()| ConsoleCommand::Help),
+        "reload" => none(rest, "reload").map(|()| ConsoleCommand::Reload),
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -70,7 +72,8 @@ fn parse_sort(rest: &[String]) -> Result<ConsoleCommand, String> {
             "name" | "natural" => Ok(ConsoleCommand::Sort(SortKey::Name)),
             "size" => Ok(ConsoleCommand::Sort(SortKey::Size)),
             "mtime" => Ok(ConsoleCommand::Sort(SortKey::Mtime)),
-            "extension" | "type" => Ok(ConsoleCommand::Sort(SortKey::Extension)),
+            "extension" => Ok(ConsoleCommand::Sort(SortKey::Extension)),
+            "type" => Ok(ConsoleCommand::Sort(SortKey::Type)),
             other => Err(format!("unknown sort {other}")),
         },
         _ => Err("sort needs a key".to_string()),
@@ -155,6 +158,9 @@ mod tests {
         assert_eq!(parse("filter zz").unwrap(), ConsoleCommand::Filter("zz".into()));
         assert_eq!(parse("filter clear").unwrap(), ConsoleCommand::ClearFilter);
         assert_eq!(parse("sort size").unwrap(), ConsoleCommand::Sort(SortKey::Size));
+        assert_eq!(parse("sort type").unwrap(), ConsoleCommand::Sort(SortKey::Type));
+        assert_eq!(parse("sort extension").unwrap(), ConsoleCommand::Sort(SortKey::Extension));
+        assert_eq!(parse("reload").unwrap(), ConsoleCommand::Reload);
         assert_eq!(parse("sort reverse").unwrap(), ConsoleCommand::ToggleReverse);
         assert_eq!(parse("hidden").unwrap(), ConsoleCommand::ToggleHidden);
         assert_eq!(parse("shell echo hi").unwrap(), ConsoleCommand::Shell("echo hi".into()));
