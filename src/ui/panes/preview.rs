@@ -47,6 +47,9 @@ pub fn preview_text(state: &AppState) -> String {
             FilePreview::Binary { path } if path == &entry.path => {
                 format!("{}\n{} bytes\n\n<binary file>", entry.name, entry.size)
             }
+            FilePreview::Image { path, width, height } if path == &entry.path => {
+                format!("{}\n{} bytes\n\nimage {width}x{height}", entry.name, entry.size)
+            }
             FilePreview::Error { message, path } if path == &entry.path => {
                 format!("{}\n{} bytes\n\npreview failed: {message}", entry.name, entry.size)
             }
@@ -212,6 +215,7 @@ mod tests {
         assert!(current_buffer_text(&mut terminal).contains("UNIQUE_PREV_XYZ"));
 
         let mut viminfo = AppState::new("/tmp".into());
+        viminfo.view.show_hidden = true;
         viminfo.entries = vec![FileEntry::new("/tmp/.viminfo".into(), false, 8)];
         viminfo.preview = FilePreview::Text {
             path: PathBuf::from("/tmp/.viminfo"),
@@ -237,6 +241,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
 
         let mut long = AppState::new("/tmp".into());
+        long.view.show_hidden = true;
         long.entries = vec![FileEntry::new("/tmp/.gitignore".into(), false, 4)];
         long.preview = FilePreview::Text {
             path: PathBuf::from("/tmp/.gitignore"),
@@ -250,6 +255,7 @@ mod tests {
         }
 
         let mut short = AppState::new("/tmp".into());
+        short.view.show_hidden = true;
         short.entries = vec![FileEntry::new("/tmp/.env".into(), false, 1)];
         short.preview = FilePreview::Text {
             path: PathBuf::from("/tmp/.env"),
@@ -268,6 +274,21 @@ mod tests {
             !after.contains("ignore"),
             "leftover from .gitignore: {after:?}"
         );
+    }
+
+    #[test]
+    fn a_hidden_file_is_not_previewed_while_hidden_files_are_off() {
+        let mut state = AppState::new("/tmp".into());
+        state.entries = vec![FileEntry::new("/tmp/.env".into(), false, 1)];
+        state.preview = FilePreview::Text {
+            path: PathBuf::from("/tmp/.env"),
+            content: "SECRET".into(),
+            truncated: false,
+        };
+        let text = preview_text(&state);
+        assert!(text.contains("nothing selected"), "{text}");
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(!text.contains(".env"), "{text}");
     }
 
     fn current_buffer_text(terminal: &mut Terminal<TestBackend>) -> String {

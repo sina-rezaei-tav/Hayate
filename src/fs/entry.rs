@@ -10,6 +10,8 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub size: u64,
     pub is_hidden: bool,
+    /// Unix seconds. `0` when the scanner could not read mtime.
+    pub modified: u64,
 }
 
 impl FileEntry {
@@ -28,6 +30,7 @@ impl FileEntry {
             is_dir,
             size,
             is_hidden,
+            modified: 0,
         }
     }
 }
@@ -35,12 +38,7 @@ impl FileEntry {
 /// Directories first, then by name. Re-applied after every scan batch so a
 /// listing is ordered even while it is still streaming in.
 pub fn sort_listing(entries: &mut [FileEntry]) {
-    entries.sort_by(|left, right| {
-        right
-            .is_dir
-            .cmp(&left.is_dir)
-            .then_with(|| left.name.as_str().cmp(right.name.as_str()))
-    });
+    super::sort::sort_entries(entries, &super::sort::SortSpec::default());
 }
 
 #[cfg(test)]

@@ -100,6 +100,48 @@ pub fn spawn_recursive_count(
 
 /// Reads a text preview of `path` off the render thread. Sends nothing if
 /// the load is cancelled (the selection moved on).
+pub fn spawn_image_preview(path: PathBuf, cancel_token: CancellationToken, messages: UnboundedSender<Message>) {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        if cancel_token.is_cancelled() {
+            return;
+        }
+        let payload = match crate::preview::image::probe(&path) {
+            Ok((width, height)) => preview::PreviewPayload::Image { width, height },
+            Err(err) => preview::PreviewPayload::Error(err),
+        };
+        if cancel_token.is_cancelled() {
+            return;
+        }
+        let _ = messages.send(Message::PreviewReady(path, payload));
+    }));
+}
+
+pub fn spawn_file_op(
+    op: crate::fs::DiskOp,
+    refresh: PathBuf,
+    generation: u64,
+    cancel_token: CancellationToken,
+    messages: UnboundedSender<Message>,
+) {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        let report = crate::fs::ops::execute(&op, &cancel_token);
+        let clear_cut = if report.clear_sources {
+            match &op {
+                crate::fs::DiskOp::Paste { sources, cut: true, .. } => Some(sources.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let _ = messages.send(Message::FileOpFinished {
+            generation,
+            notice: report.notice,
+            refresh,
+            clear_cut,
+        });
+    }));
+}
+
 pub fn spawn_preview(
     path: PathBuf,
     cancel_token: CancellationToken,

@@ -28,14 +28,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let current_name = state.current_dir.file_name().map(|name| name.to_string_lossy());
         let mut selected = None;
         let items: Vec<ListItem> = state
-            .parent_entries
+            .shown_parent_entries()
             .iter()
             .enumerate()
-            .map(|(index, entry)| {
+            .map(|(slot, (_, entry))| {
                 let label = entry_label(entry);
                 let is_current_dir = current_name.as_deref() == Some(entry.name.as_str());
                 if is_current_dir {
-                    selected = Some(index);
+                    selected = Some(slot);
                 }
                 let style = if is_current_dir {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)

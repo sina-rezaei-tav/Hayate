@@ -7,12 +7,19 @@
 //! key -> intent lookup, `navigation` for directory changes, and `jobs`
 //! for spawning.
 
+pub mod act;
 pub mod command;
+pub mod console;
 pub mod editor;
 pub mod jobs;
 pub mod message;
+pub mod mode;
+pub mod motion;
 pub mod navigation;
 pub mod open_with;
+pub mod prompt;
+pub mod rifle;
+pub mod search;
 pub mod state;
 
 pub use state::AppState;
@@ -23,11 +30,13 @@ use crossterm::event::Event;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use act::Step;
 use command::{feed, Command, Feed};
 use editor::EditorLaunch;
 use message::{Message, update};
+use mode::InteractionMode;
 use navigation::ScanPlan;
-use open_with::{InteractionMode, OpenWithAction, OpenWithPrompt};
+use open_with::{OpenWithAction, OpenWithPrompt};
 
 use crate::event::{AppEvent, EventHandler};
 use crate::ui;
@@ -200,17 +209,38 @@ fn handle_message(state: &mut AppState, ctl: &mut LoopCtl, message: Message) {
         _ => {}
     }
     update(state, message);
+    if state.pending_rescan {
+        state.pending_rescan = false;
+        let plan = navigation::rescan_current(state);
+        ctl.apply_scan_plan(state, plan);
+    }
     request_preview_if_needed(state, ctl);
 }
 
 fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> LoopEffect {
+    run_counted(command, None, state, ctl)
+}
+
+fn run_counted(command: Command, count: Option<u32>, state: &mut AppState, ctl: &mut LoopCtl) -> LoopEffect {
     state.notice = None;
-    match command {
-        Command::Quit => {
-            state.should_quit = true;
+    let metrics = act::Metrics {
+        list_page: list_page_lines(state),
+        list_half: list_half_page(state),
+        preview_limit: preview_scroll_metrics(state).1,
+    };
+    perform(act::apply(command, count, state, metrics), state, ctl)
+}
+
+fn perform(step: Step, state: &mut AppState, ctl: &mut LoopCtl) -> LoopEffect {
+    match step {
+        Step::None => LoopEffect::None,
+        Step::Scan(plan) => {
+            ctl.apply_scan_plan(state, plan);
             LoopEffect::None
         }
-        Command::RecountRecursive => {
+        Step::OpenEditor(path) => LoopEffect::OpenEditor(path),
+        Step::Run { spec, report_nonzero } => LoopEffect::RunExternal { spec, report_nonzero },
+        Step::Recount => {
             if state.is_counting_recursively {
                 return LoopEffect::None;
             }
@@ -226,7 +256,7 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> Loo
             ctl.active_job_cancel = Some(job_token);
             LoopEffect::None
         }
-        Command::Cancel => {
+        Step::CancelJob => {
             if let Some(token) = ctl.active_job_cancel.take() {
                 token.cancel();
                 state.count_generation = state.count_generation.wrapping_add(1);
@@ -234,75 +264,15 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> Loo
             state.is_counting_recursively = false;
             LoopEffect::None
         }
-        Command::SelectPrevious => {
-            nudge_selection(state, -1);
-            LoopEffect::None
-        }
-        Command::SelectNext => {
-            nudge_selection(state, 1);
-            LoopEffect::None
-        }
-        Command::MoveHalfUp => {
-            nudge_selection(state, -(list_half_page(state) as isize));
-            LoopEffect::None
-        }
-        Command::MoveHalfDown => {
-            nudge_selection(state, list_half_page(state) as isize);
-            LoopEffect::None
-        }
-        Command::MovePageUp => {
-            nudge_selection(state, -(list_page_lines(state) as isize));
-            LoopEffect::None
-        }
-        Command::MovePageDown => {
-            nudge_selection(state, list_page_lines(state) as isize);
-            LoopEffect::None
-        }
-        Command::MoveToTop => {
-            if !state.entries.is_empty() {
-                state.selected = 0;
-            }
-            LoopEffect::None
-        }
-        Command::MoveToBottom => {
-            if !state.entries.is_empty() {
-                state.selected = state.entries.len() - 1;
-            }
-            LoopEffect::None
-        }
-        Command::EnterDirectory => {
-            if let Some(plan) = navigation::enter_selected(state) {
-                ctl.apply_scan_plan(state, plan);
-            }
-            LoopEffect::None
-        }
-        Command::Activate => {
-            if let Some(plan) = navigation::enter_selected(state) {
-                ctl.apply_scan_plan(state, plan);
-                LoopEffect::None
-            } else {
-                open_selected_file(state)
-            }
-        }
-        Command::OpenInEditor => open_selected_file(state),
-        Command::OpenWith => {
+        Step::OpenWith => {
             begin_open_with(state, ctl);
             LoopEffect::None
         }
-        Command::OpenParent => {
-            if let Some(plan) = navigation::open_parent(state) {
-                ctl.apply_scan_plan(state, plan);
-            }
-            LoopEffect::None
-        }
-        Command::PreviewLineUp => {
-            let (_, limit) = preview_scroll_metrics(state);
-            state.scroll_preview(-1, limit);
-            LoopEffect::None
-        }
-        Command::PreviewLineDown => {
-            let (_, limit) = preview_scroll_metrics(state);
-            state.scroll_preview(1, limit);
+        Step::FileOp { op, refresh } => {
+            state.file_op_generation = state.file_op_generation.wrapping_add(1);
+            let generation = state.file_op_generation;
+            let token = ctl.app_cancel.child_token();
+            jobs::spawn_file_op(op, refresh, generation, token, ctl.messages.clone());
             LoopEffect::None
         }
     }
@@ -318,15 +288,6 @@ enum LoopEffect {
         spec: EditorLaunch,
         report_nonzero: bool,
     },
-}
-
-fn nudge_selection(state: &mut AppState, delta: isize) {
-    if state.entries.is_empty() {
-        return;
-    }
-    let current = state.selected_index().unwrap_or(0) as isize;
-    let last = state.entries.len() as isize - 1;
-    state.selected = (current + delta).clamp(0, last) as usize;
 }
 
 fn list_page_lines(state: &AppState) -> usize {
@@ -348,23 +309,67 @@ fn dispatch_key(
     state: &mut AppState,
     ctl: &mut LoopCtl,
 ) -> LoopEffect {
-    // Ranger: Ctrl-c aborts the running task. It does not quit, including
-    // while the open-with prompt is up.
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return LoopEffect::None;
+    }
+    // Ranger: Ctrl-c aborts the running task. It does not quit, in any mode.
     if is_ctrl_c(key) {
-        state.chord.clear();
-        if matches!(state.mode, InteractionMode::OpenWith(_)) {
-            close_open_with(state, ctl);
-        }
+        dismiss_transient(state, ctl);
         return run_command(Command::Cancel, state, ctl);
     }
+    let step = match &state.mode {
+        InteractionMode::OpenWith(_) => {
+            state.chord.clear();
+            return apply_open_with_key(key, state, ctl);
+        }
+        InteractionMode::Line(_) => act::on_line(state, key),
+        InteractionMode::Confirm(_) => act::on_confirm(state, key),
+        InteractionMode::Help(_) => {
+            let (page, max) = overlay_scroll(state, true);
+            act::on_help(state, key, max, page)
+        }
+        InteractionMode::Pager(_) => {
+            let (page, max) = overlay_scroll(state, false);
+            act::on_pager(state, key, max, page)
+        }
+        InteractionMode::OneKey(_) => act::on_one_key(state, key),
+        InteractionMode::Browser => {
+            if key.code == crossterm::event::KeyCode::Esc && key.modifiers == crossterm::event::KeyModifiers::NONE && (!state.chord.is_empty() || state.visual_anchor.is_some())
+            {
+                state.chord.clear();
+                state.visual_anchor = None;
+                state.visual_base.clear();
+                return LoopEffect::None;
+            }
+            match feed(&mut state.chord, key) {
+                Feed::Command(resolved) => return run_counted(resolved.command, resolved.count, state, ctl),
+                Feed::Pending | Feed::Ignored => return LoopEffect::None,
+            }
+        }
+    };
+    perform(step, state, ctl)
+}
+
+fn dismiss_transient(state: &mut AppState, ctl: &mut LoopCtl) {
     if matches!(state.mode, InteractionMode::OpenWith(_)) {
-        state.chord.clear();
-        return apply_open_with_key(key, state, ctl);
+        close_open_with(state, ctl);
     }
-    match feed(&mut state.chord, key) {
-        Feed::Command(command) => run_command(command, state, ctl),
-        Feed::Pending | Feed::Ignored => LoopEffect::None,
-    }
+    state.mode = InteractionMode::Browser;
+    state.chord.clear();
+    state.visual_anchor = None;
+    state.visual_base.clear();
+}
+
+fn overlay_scroll(state: &AppState, help: bool) -> (u16, u16) {
+    let text = if help {
+        crate::ui::panes::overlay::help_text()
+    } else {
+        crate::ui::panes::overlay::pager_text(state)
+    };
+    let page = state.frame_height.saturating_sub(2).max(1);
+    let lines = text.lines().count();
+    let max = lines.saturating_sub(page as usize) as u16;
+    (page, max)
 }
 
 fn is_ctrl_c(key: crossterm::event::KeyEvent) -> bool {
@@ -424,13 +429,6 @@ fn begin_open_with(state: &mut AppState, ctl: &mut LoopCtl) {
     let generation = state.open_with_generation;
     state.mode = InteractionMode::OpenWith(OpenWithPrompt::new(path, generation));
     ctl.start_open_with_listing(generation);
-}
-
-fn open_selected_file(state: &AppState) -> LoopEffect {
-    match state.selected_entry() {
-        Some(entry) if !entry.is_dir => LoopEffect::OpenEditor(entry.path.clone()),
-        _ => LoopEffect::None,
-    }
 }
 
 fn resolve_editor_spec(state: &mut AppState, path: &Path) -> Option<EditorLaunch> {
@@ -507,9 +505,17 @@ fn request_preview_if_needed(state: &mut AppState, ctl: &mut LoopCtl) {
         Some(path) => {
             ctl.cancel_preview();
             let token = ctl.app_cancel.child_token();
+            let image = state.view.preview_images
+                && state.selected_entry().is_some_and(|entry| {
+                    entry.path == path && crate::preview::image::is_image_name(entry.name.as_str())
+                });
             state.preview = crate::preview::FilePreview::Loading(path.clone());
             state.preview_scroll = 0;
-            jobs::spawn_preview(path, token.clone(), ctl.messages.clone());
+            if image {
+                jobs::spawn_image_preview(path, token.clone(), ctl.messages.clone());
+            } else {
+                jobs::spawn_preview(path, token.clone(), ctl.messages.clone());
+            }
             ctl.preview_cancel = Some(token);
         }
     }
@@ -1118,7 +1124,7 @@ mod tests {
         assert_eq!(state.selected, 0, "j must not move the file list while the picker is open");
         match &state.mode {
             InteractionMode::OpenWith(prompt) => assert_eq!(prompt.selected, 1),
-            InteractionMode::Browser => panic!("picker closed"),
+            other => panic!("picker closed: {other:?}"),
         }
     }
 
@@ -1133,7 +1139,7 @@ mod tests {
         assert!(!state.should_quit);
         match &state.mode {
             InteractionMode::OpenWith(prompt) => assert_eq!(prompt.query, "q"),
-            InteractionMode::Browser => panic!("picker closed"),
+            other => panic!("picker closed: {other:?}"),
         }
     }
 

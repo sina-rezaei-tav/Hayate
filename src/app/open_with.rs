@@ -25,12 +25,6 @@ pub const DISPLAY_LIMIT: usize = 20;
 pub const CURATED: &[&str] = &["nvim", "vim", "vi", "nano", "xdg-open", "less"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InteractionMode {
-    Browser,
-    OpenWith(OpenWithPrompt),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenWithPrompt {
     pub target: PathBuf,
     pub target_name: CompactString,

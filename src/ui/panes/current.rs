@@ -10,11 +10,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use crate::app::AppState;
 
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let title = format!(
-        "[2] Current ({} entries) — {}",
-        state.entries.len(),
-        pane_status(state)
-    );
+    let shown = state.shown_entries();
+    let title = format!("[2] Current ({} entries) — {}", shown.len(), pane_status(state));
     let block = Block::default().borders(Borders::ALL).title(title);
 
     let (items, selected) = if let Some(err) = &state.current_scan_error {
@@ -23,13 +20,18 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             None,
         )
     } else {
-        let items: Vec<ListItem> = state
-            .entries
+        let highlight = state.selected_entry().map(|entry| entry.path.clone());
+        let mut selected_slot = None;
+        let items: Vec<ListItem> = shown
             .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                let label = entry_label(entry);
-                let style = if Some(index) == state.selected_index() {
+            .map(|(slot, (_, entry))| {
+                let label = entry_label(state, entry);
+                let is_selected = highlight.as_ref() == Some(&entry.path);
+                if is_selected {
+                    selected_slot = Some(slot);
+                }
+                let style = if is_selected {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     Style::default()
@@ -37,7 +39,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                 ListItem::new(Line::from(label)).style(style)
             })
             .collect();
-        (items, state.selected_index())
+        (items, selected_slot)
     };
 
     let mut list_state = ListState::default();
@@ -45,11 +47,18 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_stateful_widget(List::new(items).block(block), area, &mut list_state);
 }
 
-fn entry_label(entry: &crate::fs::FileEntry) -> String {
-    if entry.is_dir {
-        format!("{}/", entry.name)
+fn entry_label(state: &AppState, entry: &crate::fs::FileEntry) -> String {
+    let marker = if state.marked.contains(&entry.path) {
+        "* "
+    } else if state.clipboard.cut && state.clipboard.paths.iter().any(|path| path == &entry.path) {
+        "+ "
     } else {
-        entry.name.to_string()
+        ""
+    };
+    if entry.is_dir {
+        format!("{marker}{}/", entry.name)
+    } else {
+        format!("{marker}{}", entry.name)
     }
 }
 

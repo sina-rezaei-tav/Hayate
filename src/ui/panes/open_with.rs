@@ -10,7 +10,7 @@ use crate::app::open_with::OpenWithRow;
 use crate::app::AppState;
 
 pub fn render(frame: &mut Frame, state: &AppState) {
-    let crate::app::open_with::InteractionMode::OpenWith(prompt) = &state.mode else {
+    let crate::app::mode::InteractionMode::OpenWith(prompt) = &state.mode else {
         return;
     };
 
@@ -103,7 +103,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::app::open_with::{InteractionMode, OpenWithPrompt};
+    use crate::app::mode::InteractionMode;
+    use crate::app::open_with::OpenWithPrompt;
     use crate::fs::FileEntry;
 
     use super::*;
