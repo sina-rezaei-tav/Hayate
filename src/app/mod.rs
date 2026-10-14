@@ -51,6 +51,7 @@ struct LoopCtl {
     active_job_cancel: Option<CancellationToken>,
     preview_cancel: Option<CancellationToken>,
     open_with_cancel: Option<CancellationToken>,
+    watch_cancel: Option<CancellationToken>,
     messages: UnboundedSender<Message>,
 }
 
@@ -62,6 +63,7 @@ impl LoopCtl {
             active_job_cancel: None,
             preview_cancel: None,
             open_with_cancel: None,
+            watch_cancel: None,
             messages,
         }
     }
@@ -124,6 +126,16 @@ impl LoopCtl {
                 self.messages.clone(),
             );
         }
+        self.restart_watch(state);
+    }
+
+    fn restart_watch(&mut self, state: &AppState) {
+        if let Some(token) = self.watch_cancel.take() {
+            token.cancel();
+        }
+        let token = self.app_cancel.child_token();
+        jobs::spawn_watch(state.current_dir.clone(), state.scan_generation, token.clone(), self.messages.clone());
+        self.watch_cancel = Some(token);
     }
 }
 

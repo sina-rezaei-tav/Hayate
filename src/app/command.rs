@@ -77,6 +77,8 @@ pub enum Command {
     BeginShell,
     OpenShell,
     DisplayFile,
+    /// Ranger `R`. Re-reads the current directory without leaving it.
+    Reload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +317,7 @@ fn bindings() -> &'static [Binding] {
             row(vec![stroke(KeyCode::Right, KeyModifiers::NONE)], Command::Activate, "Right", "enter or open"),
             row(vec![stroke(KeyCode::Enter, KeyModifiers::NONE)], Command::Activate, "Enter", "enter or open"),
             row(vec![shift('e')], Command::OpenInEditor, "E", "edit in $EDITOR"),
+            row(vec![shift('r')], Command::Reload, "R", "reload this directory"),
             row(vec![shift('j')], Command::MoveHalfDown, "J", "half page down"),
             row(vec![shift('k')], Command::MoveHalfUp, "K", "half page up"),
             row(vec![ctrl('d')], Command::MoveHalfDown, "Ctrl-d", "half page down"),
@@ -339,7 +342,7 @@ fn bindings() -> &'static [Binding] {
             row(vec![ch('o'), ch('s')], Command::Sort(SortKey::Size), "os", "sort by size"),
             row(vec![ch('o'), ch('m')], Command::Sort(SortKey::Mtime), "om", "sort by time"),
             row(vec![ch('o'), ch('e')], Command::Sort(SortKey::Extension), "oe", "sort by extension"),
-            row(vec![ch('o'), ch('t')], Command::Sort(SortKey::Extension), "ot", "sort by extension"),
+            row(vec![ch('o'), ch('t')], Command::Sort(SortKey::Type), "ot", "sort by kind"),
             row(vec![ch('o'), ch('r')], Command::ToggleSortReverse, "or", "reverse the sort"),
             row(vec![ch('/')], Command::BeginSearch, "/", "search names"),
             row(vec![ch('n')], Command::SearchNext, "n", "next match"),
@@ -453,7 +456,7 @@ mod tests {
     #[test]
     fn bare_r_opens_with_and_shift_r_does_not() {
         assert_eq!(command_for_key(key(KeyCode::Char('r'), KeyModifiers::NONE)), Some(Command::OpenWith));
-        assert_eq!(command_for_key(key(KeyCode::Char('r'), KeyModifiers::SHIFT)), None);
+        assert_eq!(command_for_key(key(KeyCode::Char('r'), KeyModifiers::SHIFT)), Some(Command::Reload));
     }
 
     #[test]
@@ -578,6 +581,8 @@ mod tests {
             (&[('z', false), ('i', false)], Command::ToggleImages),
             (&[('z', false), ('z', false)], Command::ClearFilter),
             (&[('o', false), ('s', false)], Command::Sort(SortKey::Size)),
+            (&[('o', false), ('t', false)], Command::Sort(SortKey::Type)),
+            (&[('o', false), ('e', false)], Command::Sort(SortKey::Extension)),
             (&[('o', false), ('r', false)], Command::ToggleSortReverse),
             (&[('u', false), ('v', false)], Command::ClearMarks),
             (&[('u', false), ('m', false)], Command::BeginBookmarkUnset),
@@ -678,6 +683,7 @@ mod tests {
                 'i' => Some(Command::Rename(RenameKind::Insert)),
                 's' => Some(Command::OpenShell),
                 'v' => Some(Command::ToggleVisual),
+                'r' => Some(Command::Reload),
                 _ => None,
             };
         }

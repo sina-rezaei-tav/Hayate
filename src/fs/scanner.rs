@@ -113,18 +113,37 @@ async fn send_update(
 }
 
 async fn to_file_entry(dir_entry: &DirEntry) -> Option<FileEntry> {
-    // Skipping entries whose metadata can't be read (permission errors,
-    // races with concurrent deletion) rather than failing the whole scan.
-    let metadata = dir_entry.metadata().await.ok()?;
-    let modified = metadata
+    // `file_type` does not follow. `metadata` does, so a symlink to a
+    // directory stays enterable, while a dangling symlink is still listed
+    // instead of being dropped on the follow error.
+    let file_type = dir_entry.file_type().await.ok()?;
+    let is_symlink = file_type.is_symlink();
+    // `DirEntry::metadata` does not follow. A link to a directory has to be
+    // stat'd through `fs::metadata`, or `l` would try to open it as a file.
+    let followed = if is_symlink {
+        tokio::fs::metadata(dir_entry.path()).await.ok()
+    } else {
+        dir_entry.metadata().await.ok()
+    };
+    if !is_symlink && followed.is_none() {
+        return None;
+    }
+    let is_dir = followed.as_ref().is_some_and(|metadata| metadata.is_dir());
+    let size = followed.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
+    let modified = followed.as_ref().map(modified_secs).unwrap_or(0);
+    let mut entry = FileEntry::new(dir_entry.path(), is_dir, size);
+    entry.is_symlink = is_symlink;
+    entry.modified = modified;
+    Some(entry)
+}
+
+fn modified_secs(metadata: &std::fs::Metadata) -> u64 {
+    metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let mut entry = FileEntry::new(dir_entry.path(), metadata.is_dir(), metadata.len());
-    entry.modified = modified;
-    Some(entry)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -138,6 +157,18 @@ mod tests {
 
     fn write_file(dir: &std::path::Path, name: &str) {
         std::fs::write(dir.join(name), b"x").unwrap();
+    }
+
+    async fn collect(path: &std::path::Path) -> Vec<FileEntry> {
+        let mut receiver = scan_directory(path.to_path_buf(), CancellationToken::new());
+        let mut listed = Vec::new();
+        while let Some(update) = receiver.recv().await {
+            match update {
+                ScanUpdate::Batch(batch) => listed.extend(batch),
+                ScanUpdate::Failed(err) => panic!("scan failed: {err}"),
+            }
+        }
+        listed
     }
 
     #[tokio::test]
@@ -208,11 +239,38 @@ mod tests {
             }
         }
 
-        let alias = listed.iter().find(|entry| entry.name == "alias.txt");
-        assert!(
-            matches!(alias, Some(entry) if !entry.is_dir),
-            "symlink-to-file must list as a file so preview and count agree: {listed:?}"
-        );
+        let alias = listed.iter().find(|entry| entry.name == "alias.txt").expect("alias missing");
+        assert!(!alias.is_dir, "symlink-to-file must list as a file: {alias:?}");
+        assert!(alias.is_symlink, "symlink-to-file must be marked as a link: {alias:?}");
+        let real = listed.iter().find(|entry| entry.name == "real.txt").expect("real missing");
+        assert!(!real.is_symlink);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_directory_stays_enterable_and_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("linked")).unwrap();
+
+        let path = dir.path().to_path_buf();
+        let listed = collect(&path).await;
+        let linked = listed.iter().find(|entry| entry.name == "linked").expect("linked missing");
+        assert!(linked.is_dir, "l must still enter a link to a directory: {linked:?}");
+        assert!(linked.is_symlink);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_symlink_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), dir.path().join("gone")).unwrap();
+
+        let path = dir.path().to_path_buf();
+        let listed = collect(&path).await;
+        let gone = listed.iter().find(|entry| entry.name == "gone").expect("dangling link was dropped");
+        assert!(gone.is_symlink);
+        assert!(!gone.is_dir, "a dangling link must not be entered as a directory");
     }
 
     #[tokio::test]

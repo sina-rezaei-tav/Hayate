@@ -10,6 +10,10 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub size: u64,
     pub is_hidden: bool,
+    /// The entry itself is a symlink. `is_dir` is then the target: a link
+    /// to a directory can still be entered, and a dangling link is listed
+    /// with both flags false except `is_symlink`.
+    pub is_symlink: bool,
     /// Unix seconds. `0` when the scanner could not read mtime.
     pub modified: u64,
 }
@@ -30,7 +34,20 @@ impl FileEntry {
             is_dir,
             size,
             is_hidden,
+            is_symlink: false,
             modified: 0,
+        }
+    }
+
+    /// Suffix drawn after the name. A symlink is marked even when its
+    /// target is a directory, so the row is not indistinguishable from a
+    /// real directory.
+    pub fn kind_suffix(&self) -> &'static str {
+        match (self.is_dir, self.is_symlink) {
+            (true, true) => "/@",
+            (true, false) => "/",
+            (false, true) => "@",
+            (false, false) => "",
         }
     }
 }
@@ -77,6 +94,20 @@ mod tests {
         sort_listing(&mut entries);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["b", "m", "a.txt", "z.txt"]);
+    }
+
+    #[test]
+    fn kind_suffix_marks_links_without_hiding_directories() {
+        let file = FileEntry::new("/tmp/a.txt".into(), false, 0);
+        assert_eq!(file.kind_suffix(), "");
+        let mut link = FileEntry::new("/tmp/a.txt".into(), false, 0);
+        link.is_symlink = true;
+        assert_eq!(link.kind_suffix(), "@");
+        let dir = FileEntry::new("/tmp/sub".into(), true, 0);
+        assert_eq!(dir.kind_suffix(), "/");
+        let mut linked_dir = FileEntry::new("/tmp/sub".into(), true, 0);
+        linked_dir.is_symlink = true;
+        assert_eq!(linked_dir.kind_suffix(), "/@");
     }
 
     #[test]

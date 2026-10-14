@@ -55,11 +55,7 @@ fn entry_label(state: &AppState, entry: &crate::fs::FileEntry) -> String {
     } else {
         ""
     };
-    if entry.is_dir {
-        format!("{marker}{}/", entry.name)
-    } else {
-        format!("{marker}{}", entry.name)
-    }
+    format!("{marker}{}{}", entry.name, entry.kind_suffix())
 }
 
 /// Status of the recursive file count (`dc`, cancellable with Esc), or a
@@ -132,6 +128,22 @@ mod tests {
 
         assert!(rows.iter().any(|(text, _)| text.contains("[2] Current (2 entries)")));
         assert!(rows.iter().any(|(text, _)| text.contains("dc counts files")));
+    }
+
+    #[test]
+    fn a_symlink_is_marked_and_a_linked_directory_keeps_its_slash() {
+        let mut state = AppState::new("/tmp".into());
+        let mut link = FileEntry::new("/tmp/alias".into(), false, 1);
+        link.is_symlink = true;
+        let mut linked_dir = FileEntry::new("/tmp/linked".into(), true, 0);
+        linked_dir.is_symlink = true;
+        state.entries = vec![link, linked_dir];
+        state.view.show_hidden = true;
+
+        let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 40, 8));
+        let blob = rows.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(blob.contains("alias@"), "{blob}");
+        assert!(blob.contains("linked/@"), "{blob}");
     }
 
     #[test]

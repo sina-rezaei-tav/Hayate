@@ -142,6 +142,22 @@ pub fn spawn_file_op(
     }));
 }
 
+/// Watches `directory` non-recursively. A hit is one coalesced reload for
+/// `generation`; events from an older watch are dropped by the reducer.
+pub fn spawn_watch(directory: PathBuf, generation: u64, cancel_token: CancellationToken, messages: UnboundedSender<Message>) {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        let watched = directory.clone();
+        crate::fs::watch::drive(&directory, &cancel_token, move || {
+            messages
+                .send(Message::DirectoryChanged {
+                    generation,
+                    directory: watched.clone(),
+                })
+                .is_ok()
+        });
+    }));
+}
+
 pub fn spawn_preview(
     path: PathBuf,
     cancel_token: CancellationToken,

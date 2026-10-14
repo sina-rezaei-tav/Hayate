@@ -27,6 +27,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 pub fn preview_text(state: &AppState) -> String {
     match state.selected_entry() {
         None => "(nothing selected)".to_string(),
+        Some(entry) if entry.is_dir && entry.is_symlink => format!("{}/\nsymlink to a directory", entry.name),
         Some(entry) if entry.is_dir => format!("{}/\n<directory>", entry.name),
         Some(entry) => match &state.preview {
             FilePreview::Idle | FilePreview::Loading(_) => {
@@ -152,6 +153,17 @@ mod tests {
         assert!(content.contains("sub/"));
         assert!(content.contains("<directory>"));
         assert!(!content.contains("Loading preview"));
+    }
+
+    #[test]
+    fn a_linked_directory_is_not_drawn_as_a_real_directory() {
+        let mut state = AppState::new("/tmp".into());
+        let mut entry = FileEntry::new("/tmp/linked".into(), true, 0);
+        entry.is_symlink = true;
+        state.entries = vec![entry];
+        let content = rendered_content(&state, 40, 6);
+        assert!(content.contains("symlink to a directory"), "{content}");
+        assert!(!content.contains("<directory>"), "{content}");
     }
 
     #[test]

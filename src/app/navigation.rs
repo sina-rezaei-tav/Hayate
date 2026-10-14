@@ -89,16 +89,24 @@ pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
 }
 
 fn begin_generation(state: &mut AppState) {
+    bump_listing(state);
+    state.file_op_generation = state.file_op_generation.wrapping_add(1);
+}
+
+/// New listing generation without retiring an in-flight copy or delete.
+/// A watch reload of the directory the user is still in must not swallow
+/// that operation's notice.
+fn bump_listing(state: &mut AppState) {
     if let Some(entry) = state.selected_entry() {
         state.history.insert(state.current_dir.clone(), entry.name.clone());
     }
     state.scan_generation = state.scan_generation.wrapping_add(1);
     state.count_generation = state.count_generation.wrapping_add(1);
-    state.file_op_generation = state.file_op_generation.wrapping_add(1);
     state.preview = crate::preview::FilePreview::Idle;
     state.preview_scroll = 0;
     state.recursive_file_count = None;
     state.is_counting_recursively = false;
+    state.watch_dirty = false;
 }
 
 fn remember_departure(state: &mut AppState) {
@@ -115,8 +123,9 @@ fn remember_departure(state: &mut AppState) {
 /// Re-reads the current directory after a disk operation. Does not push
 /// history: the user did not navigate.
 pub fn rescan_current(state: &mut AppState) -> ScanPlan {
-    begin_generation(state);
+    bump_listing(state);
     state.entries.clear();
+    state.pinned = None;
     state.current_listing_complete = false;
     state.current_scan_error = None;
     state.selected = 0;
@@ -435,5 +444,29 @@ mod tests {
             Some(PathBuf::from("/tmp")),
             "reusing a failed parent listing leaves the current pane stuck on the error"
         );
+    }
+
+    #[test]
+    fn reload_keeps_the_highlight_and_does_not_retire_a_file_op() {
+        let mut state = state_in_project();
+        state.selected = 1;
+        state.file_op_generation = 3;
+
+        rescan_current(&mut state);
+
+        assert_eq!(state.file_op_generation, 3);
+        assert!(state.entries.is_empty());
+        assert_eq!(state.scan_generation, 1);
+        state.entries = vec![file("/tmp/project/src"), file("/tmp/project/README.md")];
+        state.sync_selection_after_listing_change(None);
+        assert_eq!(state.selected_entry().map(|entry| entry.name.as_str()), Some("README.md"));
+    }
+
+    #[test]
+    fn leaving_a_directory_still_retires_an_in_flight_file_op() {
+        let mut state = state_in_project();
+        state.file_op_generation = 3;
+        enter_selected(&mut state).unwrap();
+        assert_eq!(state.file_op_generation, 4);
     }
 }

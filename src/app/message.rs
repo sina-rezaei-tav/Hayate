@@ -50,6 +50,10 @@ pub enum Message {
         refresh: PathBuf,
         clear_cut: Option<Vec<PathBuf>>,
     },
+    /// The watched directory changed. Applied only when both the generation
+    /// and the directory are still current, so a late event cannot reload
+    /// a folder the user has already left.
+    DirectoryChanged { generation: u64, directory: PathBuf },
 }
 
 /// Applies one message to `state`. The single "reducer" for every
@@ -68,6 +72,12 @@ pub fn update(state: &mut AppState, message: Message) {
         }
         Message::ScanFinished(generation) if generation == state.scan_generation => {
             state.current_listing_complete = true;
+            if state.watch_dirty {
+                state.watch_dirty = false;
+                if state.current_scan_error.is_none() {
+                    state.pending_rescan = true;
+                }
+            }
         }
         Message::ParentScanFinished(generation) if generation == state.scan_generation => {
             state.parent_listing_complete = true;
@@ -144,6 +154,19 @@ pub fn update(state: &mut AppState, message: Message) {
             }
         }
         Message::FileOpFinished { .. } => {}
+        Message::DirectoryChanged { generation, directory }
+            if generation == state.scan_generation && directory == state.current_dir =>
+        {
+            state.watch_dirty = false;
+            if state.current_listing_complete && state.current_scan_error.is_none() {
+                state.pending_rescan = true;
+            } else if state.current_scan_error.is_none() {
+                state.watch_dirty = true;
+            } else {
+                state.pending_rescan = true;
+            }
+        }
+        Message::DirectoryChanged { .. } => {}
     }
 }
 
@@ -441,5 +464,92 @@ mod tests {
         let mut state = state();
         update(&mut state, Message::OpenWithListing(1, vec!["vim".into()]));
         assert!(matches!(state.mode, InteractionMode::Browser));
+    }
+
+    #[test]
+    fn a_change_in_the_open_directory_asks_for_a_rescan() {
+        let mut state = state();
+        state.current_listing_complete = true;
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 0,
+                directory: "/tmp".into(),
+            },
+        );
+        assert!(state.pending_rescan);
+        assert!(!state.watch_dirty);
+    }
+
+    #[test]
+    fn a_change_while_the_scan_is_streaming_waits_until_it_finishes() {
+        let mut state = state();
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 0,
+                directory: "/tmp".into(),
+            },
+        );
+        assert!(!state.pending_rescan);
+        assert!(state.watch_dirty);
+        update(&mut state, Message::ScanFinished(0));
+        assert!(state.pending_rescan);
+        assert!(!state.watch_dirty);
+        assert!(state.current_listing_complete);
+    }
+
+    #[test]
+    fn a_failed_scan_does_not_reload_from_a_change_that_arrived_during_it() {
+        let mut state = state();
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 0,
+                directory: "/tmp".into(),
+            },
+        );
+        update(&mut state, Message::ScanFailed(0, "gone".into()));
+        update(&mut state, Message::ScanFinished(0));
+        assert!(!state.pending_rescan, "a failed scan must not immediately rescan itself");
+        assert!(!state.watch_dirty);
+    }
+
+    #[test]
+    fn a_later_change_can_retry_after_a_failed_scan() {
+        let mut state = state();
+        state.current_scan_error = Some("gone".into());
+        state.current_listing_complete = true;
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 0,
+                directory: "/tmp".into(),
+            },
+        );
+        assert!(state.pending_rescan);
+    }
+
+    #[test]
+    fn a_stale_or_foreign_watch_event_does_not_reload() {
+        let mut state = state();
+        state.current_listing_complete = true;
+        state.scan_generation = 2;
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 1,
+                directory: "/tmp".into(),
+            },
+        );
+        update(
+            &mut state,
+            Message::DirectoryChanged {
+                generation: 2,
+                directory: "/tmp/other".into(),
+            },
+        );
+        assert!(!state.pending_rescan);
+        assert!(!state.watch_dirty);
     }
 }
