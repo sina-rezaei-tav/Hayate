@@ -116,11 +116,15 @@ async fn to_file_entry(dir_entry: &DirEntry) -> Option<FileEntry> {
     // Skipping entries whose metadata can't be read (permission errors,
     // races with concurrent deletion) rather than failing the whole scan.
     let metadata = dir_entry.metadata().await.ok()?;
-    Some(FileEntry::new(
-        dir_entry.path(),
-        metadata.is_dir(),
-        metadata.len(),
-    ))
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let mut entry = FileEntry::new(dir_entry.path(), metadata.is_dir(), metadata.len());
+    entry.modified = modified;
+    Some(entry)
 }
 
 #[cfg(test)]

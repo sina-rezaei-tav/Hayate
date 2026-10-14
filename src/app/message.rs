@@ -12,7 +12,7 @@ use compact_str::CompactString;
 use crate::fs::FileEntry;
 use crate::preview::{FilePreview, PreviewPayload};
 
-use super::open_with::InteractionMode;
+use super::mode::InteractionMode;
 use super::AppState;
 
 #[derive(Debug)]
@@ -41,6 +41,15 @@ pub enum Message {
     OpenWithListing(u64, Vec<CompactString>),
     /// PATH listing failed. Same generation rule as [`OpenWithListing`].
     OpenWithListingFailed(u64, String),
+    /// A copy, move, delete, or rename finished. Ignored when `generation`
+    /// is not the latest, so a late paste cannot refresh a directory the
+    /// user has already left.
+    FileOpFinished {
+        generation: u64,
+        notice: String,
+        refresh: PathBuf,
+        clear_cut: Option<Vec<PathBuf>>,
+    },
 }
 
 /// Applies one message to `state`. The single "reducer" for every
@@ -50,12 +59,12 @@ pub fn update(state: &mut AppState, message: Message) {
         Message::ScanBatch(generation, batch) if generation == state.scan_generation => {
             let follow = state.selected_entry().map(|entry| entry.name.clone());
             state.entries.extend(batch);
-            crate::fs::sort_listing(&mut state.entries);
+            crate::fs::sort_entries(&mut state.entries, &state.view.sort);
             state.sync_selection_after_listing_change(follow.as_deref());
         }
         Message::ParentScanBatch(generation, batch) if generation == state.scan_generation => {
             state.parent_entries.extend(batch);
-            crate::fs::sort_listing(&mut state.parent_entries);
+            crate::fs::sort_entries(&mut state.parent_entries, &state.view.sort);
         }
         Message::ScanFinished(generation) if generation == state.scan_generation => {
             state.current_listing_complete = true;
@@ -96,6 +105,7 @@ pub fn update(state: &mut AppState, message: Message) {
                         }
                     }
                     PreviewPayload::Binary => FilePreview::Binary { path },
+                    PreviewPayload::Image { width, height } => FilePreview::Image { path, width, height },
                     PreviewPayload::Error(message) => FilePreview::Error { path, message },
                 };
             }
@@ -115,6 +125,25 @@ pub fn update(state: &mut AppState, message: Message) {
                 prompt.listing_error = Some(err);
             }
         }
+        Message::FileOpFinished {
+            generation,
+            notice,
+            refresh,
+            clear_cut,
+        } if generation == state.file_op_generation => {
+            state.notice = Some(notice);
+            if let Some(sources) = clear_cut
+                && state.clipboard.cut
+                && state.clipboard.paths == sources
+            {
+                state.clipboard.paths.clear();
+                state.clipboard.cut = false;
+            }
+            if refresh == state.current_dir {
+                state.pending_rescan = true;
+            }
+        }
+        Message::FileOpFinished { .. } => {}
     }
 }
 
@@ -378,6 +407,7 @@ mod tests {
                 assert_eq!(prompt.candidates.len(), 2);
             }
             InteractionMode::Browser => panic!("picker closed by a listing"),
+            _ => panic!("picker replaced by another mode"),
         }
     }
 
@@ -402,6 +432,7 @@ mod tests {
                 assert!(prompt.listing_error.is_none());
             }
             InteractionMode::Browser => panic!("picker closed by a stale listing"),
+            _ => panic!("picker replaced by another mode"),
         }
     }
 

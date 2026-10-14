@@ -6,7 +6,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// Tried in order when neither `EDITOR` nor `VISUAL` is set. Same idea as
@@ -40,6 +40,9 @@ pub enum LaunchError {
 pub struct EditorLaunch {
     pub program: OsString,
     pub args: Vec<OsString>,
+    /// `None` keeps the process working directory. Shells set this to the
+    /// directory currently open in the file manager.
+    pub cwd: Option<PathBuf>,
 }
 
 /// `EDITOR` wins over `VISUAL`, then a PATH fallback (`nvim`/`vim`/`vi`/`nano`).
@@ -103,7 +106,24 @@ pub fn launch_spec(editor: &str, path: &Path) -> Result<EditorLaunch, EditorErro
     Ok(EditorLaunch {
         program: OsString::from(program),
         args,
+        cwd: None,
     })
+}
+
+/// `command` of `None` starts an interactive shell. Otherwise it is `shell -c`.
+/// A blank or missing `shell` falls back to `/bin/sh`.
+pub fn shell_launch(shell: Option<&str>, command: Option<&str>, cwd: &Path) -> EditorLaunch {
+    let program = shell.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("/bin/sh");
+    let mut args = Vec::new();
+    if let Some(command) = command {
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(command));
+    }
+    EditorLaunch {
+        program: OsString::from(program),
+        args,
+        cwd: Some(cwd.to_path_buf()),
+    }
 }
 
 pub fn launch_spec_from_env(path: &Path) -> Result<EditorLaunch, EditorError> {
@@ -117,9 +137,12 @@ pub fn launch_spec_from_env(path: &Path) -> Result<EditorLaunch, EditorError> {
 /// Blocking spawn. Caller must have already left raw mode and released the
 /// input task so the child owns the TTY.
 pub fn run_spec(spec: &EditorLaunch) -> Result<ExitStatus, LaunchError> {
-    Command::new(&spec.program)
-        .args(&spec.args)
-        .status()
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args);
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    command.status()
         .map_err(|source| LaunchError::Spawn {
             program: spec.program.to_string_lossy().into_owned(),
             source,

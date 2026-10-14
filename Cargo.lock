@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "compact_str",
  "crossterm",
+ "image",
  "jwalk",
  "notify",
  "ratatui",

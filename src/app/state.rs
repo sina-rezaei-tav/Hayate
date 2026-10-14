@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use compact_str::CompactString;
@@ -6,7 +6,8 @@ use compact_str::CompactString;
 use crate::fs::FileEntry;
 
 use super::command::Chord;
-use super::open_with::InteractionMode;
+use super::mode::InteractionMode;
+use super::motion::{self, View};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
@@ -65,6 +66,38 @@ pub struct AppState {
     /// Pending ranger chord (`g` of `gg`, `d` of `dc`). Cleared when the
     /// chord resolves, fails, or Esc aborts it.
     pub chord: Chord,
+    pub view: View,
+    pub search_pattern: Option<String>,
+    pub clipboard: Clipboard,
+    pub marked: HashSet<PathBuf>,
+    /// Path the visual range is anchored to. `None` means visual mode is off.
+    pub visual_anchor: Option<PathBuf>,
+    /// Marks that existed before the visual range started moving.
+    pub visual_base: HashSet<PathBuf>,
+    pub dir_back: Vec<PathBuf>,
+    pub dir_forward: Vec<PathBuf>,
+    pub tabs: Vec<Tab>,
+    pub tab_index: usize,
+    pub bookmarks: HashMap<char, PathBuf>,
+    /// Bumped when a disk operation starts and whenever the directory
+    /// changes, so a finished copy cannot refresh a directory the user left.
+    pub file_op_generation: u64,
+    pub pending_rescan: bool,
+    /// A hidden row the cursor is allowed to show, so leaving `~/.config`
+    /// does not pretend that directory was never selected.
+    pub pinned: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Clipboard {
+    pub paths: Vec<PathBuf>,
+    pub cut: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    pub dir: PathBuf,
+    pub selected_name: Option<CompactString>,
 }
 
 impl AppState {
@@ -92,6 +125,20 @@ impl AppState {
             mode: InteractionMode::Browser,
             open_with_generation: 0,
             chord: Chord::default(),
+            view: View::default(),
+            search_pattern: None,
+            clipboard: Clipboard::default(),
+            marked: HashSet::new(),
+            visual_anchor: None,
+            visual_base: HashSet::new(),
+            dir_back: Vec::new(),
+            dir_forward: Vec::new(),
+            tabs: Vec::new(),
+            tab_index: 0,
+            bookmarks: HashMap::new(),
+            file_op_generation: 0,
+            pending_rescan: false,
+            pinned: None,
         }
     }
 
@@ -106,7 +153,24 @@ impl AppState {
 
     /// The currently highlighted entry, or `None` if the list is empty.
     pub fn selected_entry(&self) -> Option<&FileEntry> {
-        self.selected_index().and_then(|i| self.entries.get(i))
+        motion::highlighted_index(self.selected, &self.entries, &self.view, self.pinned.as_deref()).and_then(|index| self.entries.get(index))
+    }
+
+    /// Rows the current pane draws, in order, with their index into `entries`.
+    pub fn shown_entries(&self) -> Vec<(usize, &FileEntry)> {
+        motion::visible_positions(&self.entries, &self.view, self.pinned.as_deref())
+            .into_iter()
+            .filter_map(|index| self.entries.get(index).map(|entry| (index, entry)))
+            .collect()
+    }
+
+    pub fn shown_parent_entries(&self) -> Vec<(usize, &FileEntry)> {
+        let current_name = self.current_dir.file_name().map(|name| name.to_string_lossy().into_owned());
+        self.parent_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| self.view.shows_parent(entry, current_name.as_deref()))
+            .collect()
     }
 
     /// Moves the preview by `delta` wrapped lines, clamped to `limit`

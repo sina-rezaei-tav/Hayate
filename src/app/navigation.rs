@@ -30,6 +30,7 @@ pub fn enter_selected(state: &mut AppState) -> Option<ScanPlan> {
         return None;
     }
 
+    remember_departure(state);
     let parent_complete = state.current_listing_complete;
     let parent_error = state.current_scan_error.clone();
     begin_generation(state);
@@ -54,6 +55,7 @@ pub fn enter_selected(state: &mut AppState) -> Option<ScanPlan> {
 /// populated; otherwise the caller must scan current too.
 pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
     let parent = usable_parent(&state.current_dir)?;
+    remember_departure(state);
     let left = state.current_dir.clone();
     let reused_complete = state.parent_listing_complete;
     let reused_error = state.parent_scan_error.take();
@@ -67,6 +69,11 @@ pub fn open_parent(state: &mut AppState) -> Option<ScanPlan> {
     state.parent_listing_complete = false;
     state.parent_scan_error = None;
     state.selected = select_left_child_or_history(state, &left);
+    state.pinned = state
+        .entries
+        .get(state.selected)
+        .filter(|entry| !state.view.shows(entry))
+        .map(|entry| entry.path.clone());
 
     let rescan_current = state.entries.is_empty()
         || !state.current_listing_complete
@@ -87,10 +94,100 @@ fn begin_generation(state: &mut AppState) {
     }
     state.scan_generation = state.scan_generation.wrapping_add(1);
     state.count_generation = state.count_generation.wrapping_add(1);
+    state.file_op_generation = state.file_op_generation.wrapping_add(1);
     state.preview = crate::preview::FilePreview::Idle;
     state.preview_scroll = 0;
     state.recursive_file_count = None;
     state.is_counting_recursively = false;
+}
+
+fn remember_departure(state: &mut AppState) {
+    state.dir_back.push(state.current_dir.clone());
+    if state.dir_back.len() > 100 {
+        state.dir_back.remove(0);
+    }
+    state.dir_forward.clear();
+}
+
+/// Changes directory. `record` pushes the directory being left onto the
+/// back stack and drops the forward stack, which is what `H` must not do
+/// to itself.
+/// Re-reads the current directory after a disk operation. Does not push
+/// history: the user did not navigate.
+pub fn rescan_current(state: &mut AppState) -> ScanPlan {
+    begin_generation(state);
+    state.entries.clear();
+    state.current_listing_complete = false;
+    state.current_scan_error = None;
+    state.selected = 0;
+    ScanPlan {
+        current: Some(state.current_dir.clone()),
+        parent: None,
+    }
+}
+
+pub fn go_to(state: &mut AppState, new_dir: PathBuf, record: bool) -> Option<ScanPlan> {
+    if new_dir == state.current_dir {
+        return None;
+    }
+    if record {
+        remember_departure(state);
+    }
+    begin_generation(state);
+    state.current_dir = new_dir.clone();
+    state.entries.clear();
+    state.parent_entries.clear();
+    state.current_listing_complete = false;
+    state.parent_listing_complete = false;
+    state.current_scan_error = None;
+    state.parent_scan_error = None;
+    state.selected = 0;
+    Some(ScanPlan {
+        current: Some(new_dir.clone()),
+        parent: usable_parent(&new_dir),
+    })
+}
+
+pub fn history_back(state: &mut AppState) -> Option<ScanPlan> {
+    let prev = state.dir_back.pop()?;
+    if prev == state.current_dir {
+        state.dir_back.push(prev);
+        return None;
+    }
+    state.dir_forward.push(state.current_dir.clone());
+    go_to(state, prev, false)
+}
+
+pub fn history_forward(state: &mut AppState) -> Option<ScanPlan> {
+    let next = state.dir_forward.pop()?;
+    if next == state.current_dir {
+        state.dir_forward.push(next);
+        return None;
+    }
+    state.dir_back.push(state.current_dir.clone());
+    go_to(state, next, false)
+}
+
+/// Joins `arg` onto `base` and pops `.` / `..` without asking the filesystem.
+/// `mkdir` does not use this; `cd` does.
+pub fn lexical_cd(base: &Path, arg: &str) -> PathBuf {
+    let extra = Path::new(arg);
+    let joined = if extra.is_absolute() { extra.to_path_buf() } else { base.join(extra) };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
 }
 
 fn usable_parent(path: &Path) -> Option<PathBuf> {

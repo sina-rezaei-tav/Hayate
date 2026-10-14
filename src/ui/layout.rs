@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::app::AppState;
 
-use super::panes::{current, open_with, parent, preview};
+use super::panes::{current, open_with, overlay, parent, preview};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let columns = split_panes(frame.area());
@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     current::render(frame, state, columns[1]);
     preview::render(frame, state, columns[2]);
     open_with::render(frame, state);
+    overlay::render(frame, state);
 }
 
 /// Same 20/40/40 split `render` uses, so preview scrolling can page by the
@@ -62,7 +63,7 @@ mod tests {
     #[test]
     fn open_with_overlay_paints_on_top_of_the_panes() {
         let mut state = AppState::new("/tmp".into());
-        state.mode = crate::app::open_with::InteractionMode::OpenWith(
+        state.mode = crate::app::mode::InteractionMode::OpenWith(
             crate::app::open_with::OpenWithPrompt::new("/tmp/a.txt".into(), 1),
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();

@@ -1,5 +1,7 @@
 //! File content preview. I/O lives here; the UI only renders cached results.
 
+pub mod image;
+
 use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncReadExt;
@@ -23,6 +25,11 @@ pub enum FilePreview {
     Binary {
         path: PathBuf,
     },
+    Image {
+        path: PathBuf,
+        width: u32,
+        height: u32,
+    },
     Error {
         path: PathBuf,
         message: String,
@@ -36,6 +43,7 @@ impl FilePreview {
             Self::Loading(path)
             | Self::Text { path, .. }
             | Self::Binary { path }
+            | Self::Image { path, .. }
             | Self::Error { path, .. } => Some(path),
         }
     }
@@ -47,6 +55,7 @@ impl FilePreview {
 pub enum PreviewPayload {
     Text { content: String, truncated: bool },
     Binary,
+    Image { width: u32, height: u32 },
     Error(String),
 }
 
