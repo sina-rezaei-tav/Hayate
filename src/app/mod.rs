@@ -23,7 +23,7 @@ use crossterm::event::Event;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use command::{Command, command_for_key};
+use command::{feed, Command, Feed};
 use editor::EditorLaunch;
 use message::{Message, update};
 use navigation::ScanPlan;
@@ -235,15 +235,38 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> Loo
             LoopEffect::None
         }
         Command::SelectPrevious => {
-            let current = state.selected_index().unwrap_or(0);
-            state.selected = current.saturating_sub(1);
+            nudge_selection(state, -1);
             LoopEffect::None
         }
         Command::SelectNext => {
-            if let Some(index) = state.selected_index()
-                && index + 1 < state.entries.len()
-            {
-                state.selected = index + 1;
+            nudge_selection(state, 1);
+            LoopEffect::None
+        }
+        Command::MoveHalfUp => {
+            nudge_selection(state, -(list_half_page(state) as isize));
+            LoopEffect::None
+        }
+        Command::MoveHalfDown => {
+            nudge_selection(state, list_half_page(state) as isize);
+            LoopEffect::None
+        }
+        Command::MovePageUp => {
+            nudge_selection(state, -(list_page_lines(state) as isize));
+            LoopEffect::None
+        }
+        Command::MovePageDown => {
+            nudge_selection(state, list_page_lines(state) as isize);
+            LoopEffect::None
+        }
+        Command::MoveToTop => {
+            if !state.entries.is_empty() {
+                state.selected = 0;
+            }
+            LoopEffect::None
+        }
+        Command::MoveToBottom => {
+            if !state.entries.is_empty() {
+                state.selected = state.entries.len() - 1;
             }
             LoopEffect::None
         }
@@ -272,14 +295,14 @@ fn run_command(command: Command, state: &mut AppState, ctl: &mut LoopCtl) -> Loo
             }
             LoopEffect::None
         }
-        Command::PreviewPageUp => {
-            let (page, limit) = preview_scroll_metrics(state);
-            state.scroll_preview(-page, limit);
+        Command::PreviewLineUp => {
+            let (_, limit) = preview_scroll_metrics(state);
+            state.scroll_preview(-1, limit);
             LoopEffect::None
         }
-        Command::PreviewPageDown => {
-            let (page, limit) = preview_scroll_metrics(state);
-            state.scroll_preview(page, limit);
+        Command::PreviewLineDown => {
+            let (_, limit) = preview_scroll_metrics(state);
+            state.scroll_preview(1, limit);
             LoopEffect::None
         }
     }
@@ -297,25 +320,63 @@ enum LoopEffect {
     },
 }
 
+fn nudge_selection(state: &mut AppState, delta: isize) {
+    if state.entries.is_empty() {
+        return;
+    }
+    let current = state.selected_index().unwrap_or(0) as isize;
+    let last = state.entries.len() as isize - 1;
+    state.selected = (current + delta).clamp(0, last) as usize;
+}
+
+fn list_page_lines(state: &AppState) -> usize {
+    let area = ui::layout::split_panes(ratatui::layout::Rect::new(
+        0,
+        0,
+        state.frame_width.max(1),
+        state.frame_height.max(1),
+    ))[1];
+    usize::from(area.height.saturating_sub(2).max(1))
+}
+
+fn list_half_page(state: &AppState) -> usize {
+    (list_page_lines(state) / 2).max(1)
+}
+
 fn dispatch_key(
     key: crossterm::event::KeyEvent,
     state: &mut AppState,
     ctl: &mut LoopCtl,
 ) -> LoopEffect {
-    // Ctrl+C is the emergency exit even inside a modal. Bare `q` types into
-    // the picker; it only quits from the browser.
-    if matches!(command_for_key(key), Some(Command::Quit))
-        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-    {
-        return run_command(Command::Quit, state, ctl);
+    // Ranger: Ctrl-c aborts the running task. It does not quit, including
+    // while the open-with prompt is up.
+    if is_ctrl_c(key) {
+        state.chord.clear();
+        if matches!(state.mode, InteractionMode::OpenWith(_)) {
+            close_open_with(state, ctl);
+        }
+        return run_command(Command::Cancel, state, ctl);
     }
     if matches!(state.mode, InteractionMode::OpenWith(_)) {
+        state.chord.clear();
         return apply_open_with_key(key, state, ctl);
     }
-    match command_for_key(key) {
-        Some(command) => run_command(command, state, ctl),
-        None => LoopEffect::None,
+    match feed(&mut state.chord, key) {
+        Feed::Command(command) => run_command(command, state, ctl),
+        Feed::Pending | Feed::Ignored => LoopEffect::None,
     }
+}
+
+fn is_ctrl_c(key: crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))
+        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+        && key.kind == crossterm::event::KeyEventKind::Press
+}
+
+fn close_open_with(state: &mut AppState, ctl: &mut LoopCtl) {
+    ctl.cancel_open_with_listing();
+    state.mode = InteractionMode::Browser;
+    state.notice = None;
 }
 
 fn apply_open_with_key(
@@ -332,9 +393,7 @@ fn apply_open_with_key(
             LoopEffect::None
         }
         OpenWithAction::Close => {
-            ctl.cancel_open_with_listing();
-            state.mode = InteractionMode::Browser;
-            state.notice = None;
+            close_open_with(state, ctl);
             LoopEffect::None
         }
         OpenWithAction::Notice(message) => {
@@ -860,23 +919,27 @@ mod tests {
     }
 
     #[test]
-    fn preview_page_down_scrolls_without_moving_the_file_list() {
+    fn preview_line_down_scrolls_without_moving_the_file_list() {
         let mut state = tall_preview_state();
         let (mut ctl, _rx) = ctl();
 
-        run_command(Command::PreviewPageDown, &mut state, &mut ctl);
+        run_command(Command::PreviewLineDown, &mut state, &mut ctl);
 
-        assert!(state.preview_scroll > 0);
+        assert_eq!(state.preview_scroll, 1);
         assert_eq!(state.selected, 0);
     }
 
     #[test]
-    fn preview_page_down_stops_at_the_last_visible_page() {
+    fn preview_line_down_stops_at_the_last_line() {
         let mut state = tall_preview_state();
         let (mut ctl, _rx) = ctl();
 
-        for _ in 0..20 {
-            run_command(Command::PreviewPageDown, &mut state, &mut ctl);
+        for _ in 0..500 {
+            let before = state.preview_scroll;
+            run_command(Command::PreviewLineDown, &mut state, &mut ctl);
+            if state.preview_scroll == before {
+                break;
+            }
         }
 
         let (_, limit) = preview_scroll_metrics(&state);
@@ -885,11 +948,11 @@ mod tests {
     }
 
     #[test]
-    fn preview_page_up_from_the_top_stays_at_zero() {
+    fn preview_line_up_from_the_top_stays_at_zero() {
         let mut state = tall_preview_state();
         let (mut ctl, _rx) = ctl();
 
-        run_command(Command::PreviewPageUp, &mut state, &mut ctl);
+        run_command(Command::PreviewLineUp, &mut state, &mut ctl);
 
         assert_eq!(state.preview_scroll, 0);
     }
@@ -946,13 +1009,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_directory_on_a_file_does_not_open_the_editor() {
+    fn l_on_a_file_opens_it() {
         let mut state = state_with_entries(1);
         let (mut ctl, _rx) = ctl();
 
-        let effect = run_command(Command::EnterDirectory, &mut state, &mut ctl);
+        let effect = dispatch_key(key(crossterm::event::KeyCode::Char('l')), &mut state, &mut ctl);
 
-        assert_eq!(effect, LoopEffect::None, "l/Right must not launch $EDITOR");
+        assert_eq!(effect, LoopEffect::OpenEditor(PathBuf::from("/tmp/0.txt")));
     }
 
     #[test]
@@ -1075,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_c_quits_even_while_the_picker_is_open() {
+    async fn ctrl_c_closes_the_picker_and_does_not_quit() {
         let mut state = state_with_entries(1);
         let (mut ctl, _rx) = ctl();
         run_command(Command::OpenWith, &mut state, &mut ctl);
@@ -1086,7 +1149,50 @@ mod tests {
         );
         dispatch_key(key, &mut state, &mut ctl);
 
-        assert!(state.should_quit);
+        assert!(!state.should_quit);
+        assert!(matches!(state.mode, InteractionMode::Browser));
+    }
+
+    #[test]
+    fn gg_moves_to_the_top_and_g_moves_to_the_bottom() {
+        let mut state = state_with_entries(30);
+        state.selected = 12;
+        let (mut ctl, _rx) = ctl();
+
+        dispatch_key(key(crossterm::event::KeyCode::Char('g')), &mut state, &mut ctl);
+        assert_eq!(state.selected, 12, "a lone g is only a chord prefix");
+        dispatch_key(key(crossterm::event::KeyCode::Char('g')), &mut state, &mut ctl);
+        assert_eq!(state.selected, 0);
+
+        dispatch_key(key(crossterm::event::KeyCode::Char('G')), &mut state, &mut ctl);
+        assert_eq!(state.selected, 29);
+    }
+
+    #[test]
+    fn a_failed_chord_does_not_run_the_second_key() {
+        let mut state = state_with_entries(5);
+        state.selected = 2;
+        let (mut ctl, _rx) = ctl();
+
+        dispatch_key(key(crossterm::event::KeyCode::Char('g')), &mut state, &mut ctl);
+        dispatch_key(key(crossterm::event::KeyCode::Char('j')), &mut state, &mut ctl);
+
+        assert_eq!(state.selected, 2, "gj is not a binding, so j must not move");
+        assert!(state.chord.is_empty());
+    }
+
+    #[test]
+    fn half_page_moves_by_half_the_current_pane() {
+        let mut state = state_with_entries(40);
+        state.frame_width = 80;
+        state.frame_height = 24;
+        let (mut ctl, _rx) = ctl();
+        let half = list_half_page(&state);
+
+        dispatch_key(key(crossterm::event::KeyCode::Char('J')), &mut state, &mut ctl);
+
+        assert_eq!(state.selected, half);
+        assert!(half > 1);
     }
 
     #[tokio::test]

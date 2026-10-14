@@ -53,8 +53,8 @@ fn entry_label(entry: &crate::fs::FileEntry) -> String {
     }
 }
 
-/// Status of the recursive file count (triggered by 'r', cancellable with
-/// Esc), or a one-shot notice from a failed command (missing `$EDITOR`).
+/// Status of the recursive file count (`dc`, cancellable with Esc), or a
+/// one-shot notice from a failed command (missing `$EDITOR`).
 fn pane_status(state: &AppState) -> String {
     if let Some(notice) = &state.notice {
         return notice.clone();
@@ -66,9 +66,9 @@ fn recount_status(state: &AppState) -> String {
     if state.is_counting_recursively {
         "counting recursively... (Esc to cancel)".to_string()
     } else if let Some(count) = state.recursive_file_count {
-        format!("{count} files recursively (r to recount)")
+        format!("{count} files recursively (dc to recount)")
     } else {
-        "press 'r' to count files recursively".to_string()
+        "dc counts files recursively".to_string()
     }
 }
 
@@ -122,7 +122,7 @@ mod tests {
         let rows = rows_with_reversed_flag(&state, Rect::new(0, 0, 60, 6));
 
         assert!(rows.iter().any(|(text, _)| text.contains("[2] Current (2 entries)")));
-        assert!(rows.iter().any(|(text, _)| text.contains("press 'r' to count")));
+        assert!(rows.iter().any(|(text, _)| text.contains("dc counts files")));
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod tests {
             .join(" ");
 
         assert!(blob.contains("no editor found"), "{blob:?}");
-        assert!(!blob.contains("press 'r' to count"), "notice should replace the recount prompt: {blob:?}");
+        assert!(!blob.contains("dc counts files"), "notice should replace the recount prompt: {blob:?}");
     }
 
     #[test]

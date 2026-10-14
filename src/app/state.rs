@@ -5,6 +5,7 @@ use compact_str::CompactString;
 
 use crate::fs::FileEntry;
 
+use super::command::Chord;
 use super::open_with::InteractionMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +49,7 @@ pub struct AppState {
     /// of lines instead of a guessed constant.
     pub frame_width: u16,
     pub frame_height: u16,
-    /// Result of the last recursive file count (triggered by pressing 'r'),
+    /// Result of the last recursive file count (triggered by `dc`),
     /// if one has completed.
     pub recursive_file_count: Option<u64>,
     /// Whether a recursive count is currently running in the background.
@@ -61,6 +62,9 @@ pub struct AppState {
     /// Incremented each time the open-with picker opens so a late PATH
     /// listing cannot fill a newer (or already closed) prompt.
     pub open_with_generation: u64,
+    /// Pending ranger chord (`g` of `gg`, `d` of `dc`). Cleared when the
+    /// chord resolves, fails, or Esc aborts it.
+    pub chord: Chord,
 }
 
 impl AppState {
@@ -87,6 +91,7 @@ impl AppState {
             notice: None,
             mode: InteractionMode::Browser,
             open_with_generation: 0,
+            chord: Chord::default(),
         }
     }
 
